@@ -1,0 +1,11 @@
+[Unit]
+Description=corners nightly backup and restore test
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=corners
+Group=corners
+EnvironmentFile=/etc/corners/secrets.env
+ExecStart=/opt/corners/app/deploy/backup.sh
+TimeoutStartSec=2h

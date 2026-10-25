@@ -1,0 +1,14 @@
+[Unit]
+Description=corners collector timer: daily digest
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+AccuracySec=1s
+RandomizedDelaySec=0
+# A run missed while the machine was down must show up as a missed slot,
+# not as a late catch-up run that looks on time.
+Persistent=false
+Unit=corners@report.service
+
+[Install]
+WantedBy=timers.target

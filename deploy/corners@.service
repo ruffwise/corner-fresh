@@ -1,0 +1,21 @@
+[Unit]
+Description=corners collector: %i
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=corners
+Group=corners
+WorkingDirectory=/opt/corners/app
+EnvironmentFile=/etc/corners/secrets.env
+ExecStart=/usr/bin/python3 -m collector --config /opt/corners/config.toml %i
+# Exit 3 = previous run of the same command still active (lock held): not a failure.
+SuccessExitStatus=3
+TimeoutStartSec=55min
+Nice=5
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/corners/data
+PrivateTmp=yes

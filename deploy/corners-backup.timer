@@ -1,0 +1,11 @@
+[Unit]
+Description=corners nightly backup
+
+[Timer]
+OnCalendar=*-*-* 02:20:00
+AccuracySec=1min
+Persistent=true
+Unit=corners-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,79 @@
+# Non-secret settings. Keys live in /etc/corners/secrets.env (AF_KEY, OP_KEY).
+db_path = "data/corners.db"           # relative to this file's directory (/opt/corners)
+archive_dir = "data/archive"
+review_dir = "data/review"
+
+# Leagues to track. api-football ids; season = starting year (2026 = 2026/27).
+# oddspapi_tournament_id is filled in on day 1 from data/review/day1_oddspapi_tournaments.json,
+# by hand, and committed. Until then OddsPapi listing/history skips that league.
+# The default set is broader than EPL/Championship/UCL because the power
+# estimate (DESIGN v0.4 §8) depends on fixtures per week. Trim it if you prefer.
+[[leagues]]
+league_id = 39     # Premier League
+season = 2026
+[[leagues]]
+league_id = 40     # Championship
+season = 2026
+[[leagues]]
+league_id = 2      # UEFA Champions League
+season = 2026
+[[leagues]]
+league_id = 140    # La Liga
+season = 2026
+[[leagues]]
+league_id = 135    # Serie A
+season = 2026
+[[leagues]]
+league_id = 78     # Bundesliga
+season = 2026
+[[leagues]]
+league_id = 61     # Ligue 1
+season = 2026
+[[leagues]]
+league_id = 3      # UEFA Europa League
+season = 2026
+
+# Exploration seasons (2025/26): needed so OddsPapi history since January 2026
+# can be mapped to api-football fixtures and outcomes. Give each the SAME
+# oddspapi_tournament_id as its 2026 entry if OddsPapi uses one id across seasons.
+# They never generate odds requests (no upcoming fixtures). Outcomes come from
+# `run.sh af-backfill`.
+[[leagues]]
+league_id = 39
+season = 2025
+[[leagues]]
+league_id = 40
+season = 2025
+[[leagues]]
+league_id = 2
+season = 2025
+[[leagues]]
+league_id = 140
+season = 2025
+[[leagues]]
+league_id = 135
+season = 2025
+[[leagues]]
+league_id = 78
+season = 2025
+[[leagues]]
+league_id = 61
+season = 2025
+[[leagues]]
+league_id = 3
+season = 2025
+
+[api_football]
+odds_horizon_days = 14
+min_interval_s = 0.25
+
+[oddspapi]
+bookmakers = "pinnacle"
+monthly_billable_budget = 20     # our cap; the guard also keeps 50 below the provider limit
+quota_reserve = 50
+fixtures_refresh_days = 28       # 8 tournaments -> ~9 billable calls/month
+# One-off: set to "2026-01-01T00:00:00Z" for the first listing so history
+# back to January is discoverable, then remove it.
+# fixtures_from = "2026-01-01T00:00:00Z"
+history_delay_h = 3.0
+history_max_per_run = 60

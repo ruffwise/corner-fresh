@@ -1,0 +1,14 @@
+[Unit]
+Description=corners collector timer: api-football odds snapshots hourly
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+AccuracySec=1s
+RandomizedDelaySec=0
+# A run missed while the machine was down must show up as a missed slot,
+# not as a late catch-up run that looks on time.
+Persistent=false
+Unit=corners@af-odds.service
+
+[Install]
+WantedBy=timers.target
