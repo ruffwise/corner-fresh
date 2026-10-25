@@ -17,6 +17,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+from .redact import POLICY_VERSION, redact
 from .store import Archive, now_ms
 
 SECRET_PARAM_NAMES = {"apikey", "api_key", "key", "token"}
@@ -64,7 +65,9 @@ def parse_date_ms(value: str | None) -> int | None:
 
 class Fetcher:
     def __init__(self, con: sqlite3.Connection, archive: Archive, transport: Transport = urllib_transport,
-                 clock: Callable[[], int] = now_ms, sleep: Callable[[float], None] = time.sleep):
+                 clock: Callable[[], int] = now_ms, sleep: Callable[[float], None] = time.sleep,
+                 secrets: tuple[str, ...] = ()):
+        self.secrets = tuple(s for s in secrets if s)
         self.con = con
         self.archive = archive
         self.transport = transport
@@ -109,6 +112,11 @@ class Fetcher:
             status, rheaders, body = 0, {}, json.dumps({"network_error": repr(e)}).encode()
         received = self.clock()
         rheaders = {k: v for k, v in rheaders.items() if k not in DROP_RESPONSE_HEADERS}
+        # The one permitted change to a raw body: redact secrets and personal data
+        # BEFORE hashing, archiving or parsing (collector/redact.py).
+        red = redact(body, self.secrets)
+        body = red.body
+        rheaders = {k: redact(v.encode(), self.secrets).body.decode("utf-8", "replace") for k, v in rheaders.items()}
         parsed = None
         try:
             parsed = json.loads(body) if body else None
@@ -129,6 +137,7 @@ class Fetcher:
             "v": 1, "provider": provider, "url": url, "params": params, "page": page, "attempt": attempt,
             "requested_at_ms": requested, "received_at_ms": received, "http_status": status,
             "response_headers": rheaders, "body_sha256": hashlib.sha256(body).hexdigest(),
+            "redaction": {"policy": POLICY_VERSION, "paths": red.paths, "reserialised": red.reserialised},
             "body": body.decode("utf-8", errors="replace"),
         }
         _, path = self.archive.write(envelope)

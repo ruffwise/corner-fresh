@@ -16,12 +16,12 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import diag, ledger, mapping
+from . import close, diag, ledger, mapping
 from .af import AF
 from .config import load
 from .http import Fetcher
 from .op import OP, QuotaRefused
-from .store import Archive, now_ms, open_db
+from .store import Archive, init_db, now_ms, open_db, seed
 
 JOB_OF = {"af-fixtures": "af_fixtures", "af-odds": "af_odds", "af-results": "af_results",
           "op-account": "op_account", "op-fixtures": "op_fixtures", "op-history": "op_history",
@@ -47,7 +47,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="collector")
     ap.add_argument("--config", default="config.toml")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for c in ("init", "plan", "watchdog", "af-fixtures", "af-odds", "af-results", "af-bootstrap", "op-account",
+    p = sub.add_parser("archive-scrub", help="redact secrets/personal data from already-archived bodies")
+    p.add_argument("--apply", action="store_true", help="rewrite (default: dry run)")
+    sub.add_parser("archive-verify")
+    for c in ("init", "migrate", "check-config", "plan", "watchdog", "af-fixtures", "af-odds", "af-results", "af-bootstrap", "op-account",
               "op-history", "report", "map-propose", "map-apply", "map-audit", "map-sample"):
         sub.add_parser(c)
     p = sub.add_parser("op-fixtures")
@@ -56,7 +59,10 @@ def main(argv=None) -> int:
     p.add_argument("--sport-id", type=int, required=True)
     p = sub.add_parser("op-check-fixture")
     p.add_argument("fixture_id")
-    p.add_argument("--kickoff", help="ISO kickoff time, e.g. 2026-10-10T16:30:00Z (else from candidates)")
+    p.add_argument("--kickoff", help="scheduled kickoff, ISO UTC, e.g. 2026-10-10T11:30:00Z")
+    p.add_argument("--af-fixture-id", type=int, help="take kickoff, status and first-half start from api-football data")
+    p.add_argument("--status", default="FT", help="api-football status when --kickoff is used (default FT)")
+    p.add_argument("--af-first-half-start", help="ISO UTC actual start, if known")
     p = sub.add_parser("af-backfill", help="outcomes for finished fixtures older than 72 h (exploration seasons)")
     p.add_argument("--max", type=int, default=1500)
     p = sub.add_parser("op-backfill")
@@ -67,6 +73,8 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     cfg = load(a.config)
+    if a.cmd == "check-config":          # read-only: creates nothing, not even a lock file
+        return check_config(cfg)
     cfg.review_dir.mkdir(parents=True, exist_ok=True)
     lock_path = cfg.db_path.parent / f".lock-{a.cmd}"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,10 +85,13 @@ def main(argv=None) -> int:
         print(f"{a.cmd}: previous run still active; exiting", file=sys.stderr)
         return 3
 
-    con = open_db(cfg.db_path)
     if a.cmd == "init":
+        con = init_db(cfg.db_path)
         out({"db": str(cfg.db_path), "tables": con.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]})
         return 0
+    if a.cmd == "migrate":
+        return migrate_cmd(cfg)
+    con = open_db(cfg.db_path)
     if a.cmd == "plan":
         out({"slots_planned": ledger.plan(con)})
         return 0
@@ -97,8 +108,17 @@ def main(argv=None) -> int:
         return 0
     if a.cmd.startswith("map-"):
         return mapping_cmd(cfg, con, a)
+    if a.cmd == "archive-scrub":
+        from .archive_tools import scrub
+        out(scrub(con, Archive(cfg.archive_dir), (cfg.af_key, cfg.op_key), apply=a.apply))
+        return 0
+    if a.cmd == "archive-verify":
+        from .archive_tools import verify
+        r = verify(con, (cfg.af_key, cfg.op_key))
+        out(r)
+        return 0 if r["problem_count"] == 0 else 1
 
-    fetcher = Fetcher(con, Archive(cfg.archive_dir))
+    fetcher = Fetcher(con, Archive(cfg.archive_dir), secrets=(cfg.af_key, cfg.op_key))
     job = JOB_OF[a.cmd]
     scheduled = a.cmd in ("af-fixtures", "af-odds", "af-results", "op-account", "op-fixtures", "op-history")
     ping(cfg, a.cmd, "/start")
@@ -123,7 +143,8 @@ def dispatch(cfg, con, fetcher, slot, a):
         r = AF(cfg, con, fetcher).bootstrap(slot)
         r["pinnacle_check"] = diag.bookmaker_check(r["bookmakers"])
         (cfg.review_dir / "day1_api_football.json").write_text(json.dumps(r, indent=2, default=str))
-        return {k: r[k] for k in ("pinnacle_check", "pinnacle_exact_name_matches", "pinnacle_like_names", "bet_count")}
+        return {k: r[k] for k in ("pinnacle_check", "pinnacle_exact_name_matches", "pinnacle_like_names",
+                                  "unnamed_bookmaker_ids", "bet_count")}
     if a.cmd == "af-fixtures":
         return {"state_changes": AF(cfg, con, fetcher).fixtures(slot)}
     if a.cmd == "af-odds":
@@ -137,6 +158,9 @@ def dispatch(cfg, con, fetcher, slot, a):
     op = OP(cfg, con, fetcher)
     if a.cmd == "op-account":
         acct = op.account(slot)
+        body = acct.pop("raw")
+        # Never print the body: only the field names it carried (values may be personal).
+        acct["fields_present"] = sorted(body.keys()) if isinstance(body, dict) else type(body).__name__
         acct["our_billable_calls_this_month"] = op.our_billable_this_month(now_ms())
         return acct
     if a.cmd == "op-catalog":
@@ -157,33 +181,85 @@ def dispatch(cfg, con, fetcher, slot, a):
         res = op.history(slot, ids=[a.fixture_id])
         if not res["usable"]:
             return {"fixture": a.fixture_id, "error": "history call did not return a usable response"}
-        body = json.loads(json.dumps(latest_body(con, a.fixture_id, cfg.op_bookmakers)))
-        if a.kickoff:
-            ko = diag.iso_ms(a.kickoff)
-            ko_src = "--kickoff argument"
-        else:
-            row = con.execute("SELECT start_ms FROM provider_fixture_candidate WHERE provider='oddspapi'"
-                              " AND provider_fixture_id=? ORDER BY raw_id DESC LIMIT 1", (a.fixture_id,)).fetchone()
-            st = (body or {}).get("startTime") or (body or {}).get("trueStartTime")
-            ko = row[0] if row else (diag.iso_ms(st) if st else None)
-            ko_src = "OddsPapi candidate" if row else ("payload startTime" if st else None)
-        if ko is None:
-            return {"fixture": a.fixture_id, "error": "kickoff unknown: rerun with --kickoff"}
-        rep = diag.close_window_report(body, ko, book=cfg.op_bookmakers.split(",")[0])
-        rep["kickoff_source"] = ko_src
+        body = latest_body(con, a.fixture_id, cfg.op_bookmakers)
+        sched, status, af_first = kickoff_inputs(con, a)
+        if sched is None:
+            return {"fixture": a.fixture_id, "error": "scheduled kickoff unknown: pass --kickoff or --af-fixture-id"}
+        row = con.execute("SELECT true_start_ms FROM provider_fixture_candidate WHERE provider='oddspapi'"
+                          " AND provider_fixture_id=? AND true_start_ms IS NOT NULL ORDER BY raw_id DESC LIMIT 1",
+                          (a.fixture_id,)).fetchone()
+        op_true = close.payload_true_start(body) or (row[0] if row else None)
+        cut = close.cutoff(sched, status, af_first, op_true)
+        rep = close.fixture_close_report(body, cut, book=cfg.op_bookmakers.split(",")[0])
+        rep["fixture"] = a.fixture_id
+        rep["payload_top_level_fields"] = sorted(body.keys()) if isinstance(body, dict) else None
         (cfg.review_dir / f"check_{a.fixture_id}.json").write_text(json.dumps(rep, indent=2))
         return rep
     raise ValueError(a.cmd)
 
 
+def kickoff_inputs(con, a):
+    """(scheduled kickoff, status, api-football first-half start) for op-check-fixture."""
+    if a.af_fixture_id:
+        row = con.execute("SELECT kickoff_ms, status_short FROM v_fixture_latest WHERE fixture_id=?",
+                          (a.af_fixture_id,)).fetchone()
+        if row is None:
+            return None, None, None
+        first = con.execute("SELECT first_half_start_ms FROM outcome_obs WHERE fixture_id=? AND source='api_football'"
+                            " ORDER BY recorded_at_ms DESC LIMIT 1", (a.af_fixture_id,)).fetchone()
+        return row[0], row[1], first[0] if first else None
+    if not a.kickoff:
+        return None, None, None
+    first = close.iso_ms(a.af_first_half_start) if a.af_first_half_start else None
+    return close.iso_ms(a.kickoff), a.status, first
+
+
 def latest_body(con, fixture_id: str, books: str):
     from .store import Archive as A
     row = con.execute(
-        "SELECT r.archive_path FROM raw_response r JOIN api_request a ON a.request_id=r.request_id"
+        "SELECT l.archive_path FROM raw_response r JOIN api_request a ON a.request_id=r.request_id"
+        " JOIN v_archive_location l ON l.raw_id = r.raw_id"
         " WHERE a.provider='oddspapi' AND a.endpoint='/v4/historical-odds' AND r.usable=1"
         " AND a.params_canonical = ? ORDER BY r.raw_id DESC LIMIT 1",
         (f"bookmakers={books}&fixtureId={fixture_id}",)).fetchone()
     return json.loads(A.read(Path(row[0]))["body"])
+
+
+def migrate_cmd(cfg) -> int:
+    """Back up (with restore test), then apply pending migrations. Safe to re-run."""
+    import sys as _s
+    from .backup import backup
+    _s.path.insert(0, str(Path(__file__).resolve().parents[1] / "db"))
+    from connect import SCHEMA_VERSION, apply_migrations, assert_schema_contract, connect
+    con = connect(cfg.db_path, check=False)
+    before = con.execute("PRAGMA user_version").fetchone()[0]
+    if before == SCHEMA_VERSION:
+        assert_schema_contract(con)
+        out({"migrated": [], "user_version": before, "note": "already current"})
+        return 0
+    bk = backup(cfg.db_path, cfg.db_path.parent / "backups", label=f"pre-migrate-v{before}")
+    applied = apply_migrations(con)
+    assert_schema_contract(con)
+    seed(con)
+    out({"backup": bk["backup"], "backup_restore_test": bk["restore_test"], "migrated": applied,
+         "user_version": con.execute("PRAGMA user_version").fetchone()[0]})
+    return 0
+
+
+def check_config(cfg) -> int:
+    """Print what this config would touch, without creating anything."""
+    exists = cfg.db_path.exists()
+    info = {"db_path": str(cfg.db_path), "db_exists": exists, "archive_dir": str(cfg.archive_dir),
+            "archive_exists": cfg.archive_dir.exists(), "review_dir": str(cfg.review_dir),
+            "leagues": len(cfg.leagues), "af_key_set": bool(cfg.af_key), "op_key_set": bool(cfg.op_key),
+            "healthchecks": sorted(cfg.healthchecks)}
+    if exists:
+        import sqlite3 as _sq
+        c = _sq.connect(f"file:{cfg.db_path}?mode=ro", uri=True)
+        info["db_user_version"] = c.execute("PRAGMA user_version").fetchone()[0]
+        info["fixtures"] = c.execute("SELECT count(*) FROM fixture").fetchone()[0]
+    out(info)
+    return 0 if exists else 1
 
 
 def mapping_cmd(cfg, con, a) -> int:

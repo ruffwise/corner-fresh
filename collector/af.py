@@ -82,10 +82,17 @@ class AF:
         st = self.call(slot, "/status", {}, "account status")
         report["status"] = st[0].body.get("response") if st else None
         books = self.call(slot, "/odds/bookmakers", {}, "bookmaker list")
-        names = sorted({(b["id"], b["name"]) for r in books for b in r.body.get("response", [])})
+        names = sorted({(b.get("id"), b.get("name")) for r in books for b in r.body.get("response", [])},
+                       key=lambda x: (x[0] is None, x[0] or 0))
+        for r in books:   # catalog every entry exactly as received, including null names
+            for b in r.body.get("response", []):
+                if b.get("id") is not None:
+                    self.con.execute("INSERT OR IGNORE INTO provider_book_catalog VALUES (?,?,?,?)",
+                                     (PROVIDER, str(b["id"]), b.get("name"), r.raw_id))
         report["bookmakers"] = names
         report["pinnacle_exact_name_matches"] = [n for n in names if n[1] == "Pinnacle"]
-        report["pinnacle_like_names"] = [n for n in names if "pinnacle" in n[1].lower()]
+        report["pinnacle_like_names"] = [n for n in names if "pinnacle" in (n[1] or "").lower()]
+        report["unnamed_bookmaker_ids"] = [i for i, n in names if not (n or "").strip()]
         bets = self.call(slot, "/odds/bets", {}, "pre-match bet list")
         report["bet_count"] = sum(len(r.body.get("response", [])) for r in bets)
         for lg in self.cfg.leagues:
@@ -196,6 +203,8 @@ class AF:
         for it, raw_id in finished:
             fid = it["fixture"]["id"]
             ft = (it.get("score") or {}).get("fulltime") or {}   # regular-time score (assumption A3)
+            first = ((it["fixture"].get("periods") or {}).get("first"))
+            first_ms = int(first) * 1000 if isinstance(first, (int, float)) else None
             ch, ca, c_raw = self.corners(slot, fid, it["teams"]["home"]["id"], it["teams"]["away"]["id"])
             kickoff = int(it["fixture"]["timestamp"]) * 1000
             if ch is None and kickoff > t - 24 * 3_600_000:
@@ -203,10 +212,10 @@ class AF:
                 continue
             self.con.execute(
                 "INSERT INTO outcome_obs (fixture_id, source, raw_id, recorded_at_ms, status_short, goals_home_90,"
-                " goals_away_90, corners_home, corners_away, corners_raw_id)"
-                " VALUES (?, 'api_football', ?, ?, ?, ?, ?, ?, ?, ?)",
+                " goals_away_90, corners_home, corners_away, corners_raw_id, first_half_start_ms)"
+                " VALUES (?, 'api_football', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (fid, raw_id, now_ms(), it["fixture"]["status"]["short"], ft.get("home"), ft.get("away"),
-                 ch, ca, c_raw if ch is not None else None))
+                 ch, ca, c_raw if ch is not None else None, first_ms))
             recorded += 1
         return {"checked": len(due), "outcomes_recorded": recorded, "awaiting_statistics": waiting}
 

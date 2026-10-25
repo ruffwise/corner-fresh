@@ -10,8 +10,19 @@ import sqlite3
 from pathlib import Path
 
 MIN_SQLITE = (3, 42, 0)  # STRICT tables; unixepoch('subsec') used by freeze triggers
-SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-SCHEMA_VERSION = 4  # PRAGMA user_version set at the end of schema.sql
+SCHEMA_PATH = Path(__file__).with_name("schema.sql")          # frozen v4 base
+MIGRATIONS_DIR = Path(__file__).with_name("migrations")       # NNN_name.sql, each ends with PRAGMA user_version = NNN
+BASE_VERSION = 4
+SCHEMA_VERSION = 5
+
+
+def migrations() -> list[tuple[int, Path]]:
+    out = sorted((int(p.name.split("_", 1)[0]), p) for p in MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+    versions = [v for v, _ in out]
+    if versions != list(range(BASE_VERSION + 1, BASE_VERSION + 1 + len(out))) or (out and versions[-1] != SCHEMA_VERSION):
+        raise ConnectionContractError(f"migration files {versions} do not run contiguously from {BASE_VERSION + 1} "
+                                      f"to {SCHEMA_VERSION}")
+    return out
 
 
 class ConnectionContractError(RuntimeError):
@@ -23,7 +34,7 @@ def _assert(cond: bool, msg: str) -> None:
         raise ConnectionContractError(msg)
 
 
-def connect(path: str | Path, *, create: bool = False) -> sqlite3.Connection:
+def connect(path: str | Path, *, create: bool = False, check: bool = True) -> sqlite3.Connection:
     ver = tuple(int(x) for x in sqlite3.sqlite_version.split("."))
     _assert(ver >= MIN_SQLITE, f"SQLite {sqlite3.sqlite_version} < 3.42: STRICT or unixepoch(subsec) unsupported")
 
@@ -41,9 +52,31 @@ def connect(path: str | Path, *, create: bool = False) -> sqlite3.Connection:
         empty = con.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table'").fetchone()[0] == 0
         _assert(empty, "create=True on a database that already has tables")
         con.executescript(SCHEMA_PATH.read_text())
+        apply_migrations(con)
 
-    assert_schema_contract(con)
+    if check:
+        assert_schema_contract(con)
     return con
+
+
+def apply_migrations(con: sqlite3.Connection) -> list[int]:
+    """Run every pending migration, each in its own transaction. Returns versions applied."""
+    done = []
+    current = con.execute("PRAGMA user_version").fetchone()[0]
+    _assert(current >= BASE_VERSION, f"database at user_version {current}: older than the v{BASE_VERSION} base")
+    for version, path in migrations():
+        if version <= current:
+            continue
+        try:
+            con.executescript("BEGIN;\n" + path.read_text() + "\nCOMMIT;")
+        except sqlite3.Error:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        got = con.execute("PRAGMA user_version").fetchone()[0]
+        _assert(got == version, f"migration {path.name} left user_version {got}, expected {version}")
+        done.append(version)
+    return done
 
 
 def assert_schema_contract(con: sqlite3.Connection) -> None:

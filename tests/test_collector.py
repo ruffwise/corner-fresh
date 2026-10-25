@@ -17,12 +17,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from collector import diag, ledger, mapping  # noqa: E402
+from collector import close, diag, ledger, mapping  # noqa: E402
 from collector.af import AF  # noqa: E402
 from collector.config import load  # noqa: E402
 from collector.http import Fetcher, canonical  # noqa: E402
 from collector.op import OP, QuotaRefused  # noqa: E402
-from collector.store import Archive, now_ms, open_db  # noqa: E402
+from collector.store import Archive, DatabaseMissing, init_db, now_ms, open_db  # noqa: E402
 
 AF_KEY = "AFSECRET-1234567890"
 OP_KEY = "OPSECRET-abcdefghij"
@@ -77,9 +77,9 @@ def env(tmp_path, monkeypatch):
         '[[leagues]]\nleague_id = 39\nseason = 2026\noddspapi_tournament_id = 17\n'
         '[oddspapi]\nmonthly_billable_budget = 5\nquota_reserve = 50\n')
     cfg = load(tmp_path / "config.toml")
-    con = open_db(cfg.db_path)
+    con = init_db(cfg.db_path)
     fake = Fake()
-    fetcher = Fetcher(con, Archive(cfg.archive_dir), transport=fake, sleep=lambda s: None)
+    fetcher = Fetcher(con, Archive(cfg.archive_dir), transport=fake, sleep=lambda s: None, secrets=(AF_KEY, OP_KEY))
     fake.add("/leagues", {"id": 39, "season": 2026},
              (200, af_page([{"league": {"id": 39, "name": "Premier League", "type": "League"},
                              "country": {"name": "England"}}])))
@@ -330,29 +330,7 @@ def test_history_not_due_before_delay(env):
     assert OP(cfg, con, f).history_due(now_ms()) == []
 
 
-# --- close-window diagnostic ------------------------------------------------------------------------
-
-def test_close_window_report_counts_final_hour():
-    ko = diag.iso_ms("2026-10-10T16:30:00Z")
-    rec = lambda t, p: {"createdAt": t, "price": p, "limit": 1, "active": True}  # noqa: E731
-    body = {"bookmakers": {"pinnacle": {"markets": {
-        "101": {"outcomes": {"101": {"players": {"0": [rec("2026-10-10T12:00:00Z", 2.0),
-                                                        rec("2026-10-10T16:10:00Z", 2.1),
-                                                        rec("2026-10-10T16:29:00Z", 2.2),
-                                                        rec("2026-10-10T16:40:00Z", 2.9)]}}}},
-        "1010": {"outcomes": {"1010": {"players": {"0": [rec("2026-10-09T10:00:00Z", 1.9)]}}}}}}}}
-    r = diag.close_window_report(body, ko)
-    assert r["records_in_final_60_min"] == 2
-    assert r["markets_with_a_record_in_final_60_min"] == 1
-    assert r["last_record_before_kickoff_min"] == 1.0
-    assert r["records_at_or_after_kickoff"] == 1
-    assert r["largest_gap_in_window_min"] == 19.0
-
-
-def test_close_window_report_empty_history():           # ABSENT Pinnacle data
-    r = diag.close_window_report({"bookmakers": {}}, diag.iso_ms("2026-10-10T16:30:00Z"))
-    assert r["records_total"] == 0 and r["last_record_before_kickoff_min"] is None
-
+# --- bookmaker check ------------------------------------------------------------------------------
 
 def test_bookmaker_check():
     assert diag.bookmaker_check([(4, "Pinnacle"), (8, "Bet365")]).startswith("PASS")
@@ -360,11 +338,17 @@ def test_bookmaker_check():
     assert diag.bookmaker_check([(4, "Pinnacle Sports")]).startswith("REVIEW")
 
 
+def test_bookmaker_check_survives_null_name():          # the live crash of 2026-10-25
+    names = [(4, "Pinnacle"), (99, None), (100, "")]
+    assert diag.bookmaker_check(names).startswith("PASS")
+    assert diag.unnamed_bookmakers(names) == [99, 100]
+
+
 # --- mapping end to end -----------------------------------------------------------------------------
 
 def test_mapping_end_to_end(env, tmp_path):
     cfg, con, fake, f = env
-    ko = diag.iso_ms("2026-10-10T16:30:00Z")
+    ko = close.iso_ms("2026-10-10T16:30:00Z")
     seed_fixture(env, ko=ko)
     fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
     fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing()))
@@ -380,7 +364,7 @@ def test_mapping_end_to_end(env, tmp_path):
 
 def test_mapping_refuses_swapped_orientation(env, tmp_path):
     cfg, con, fake, f = env
-    ko = diag.iso_ms("2026-10-10T16:30:00Z")
+    ko = close.iso_ms("2026-10-10T16:30:00Z")
     seed_fixture(env, ko=ko)
     con.execute("INSERT INTO provider_team_map VALUES ('oddspapi','17','Home FC',1,?),('oddspapi','44','Away FC',2,?)",
                 ("c" * 40, "c" * 40))
@@ -403,7 +387,7 @@ def test_load_teams_refuses_conflicts(env, tmp_path):
 
 def test_kickoff_audit_records_disagreement(env):
     cfg, con, fake, f = env
-    ko = diag.iso_ms("2026-10-10T16:30:00Z")
+    ko = close.iso_ms("2026-10-10T16:30:00Z")
     seed_fixture(env, ko=ko)
     con.execute("INSERT INTO provider_team_map VALUES ('oddspapi','17','Home FC',1,?),('oddspapi','44','Away FC',2,?)",
                 ("c" * 40, "c" * 40))
@@ -480,7 +464,7 @@ def test_restore_test_detects_short_copy(env, tmp_path):   # ABSENT rows in the 
     cfg, con, fake, f = env
     r = backup(cfg.db_path, cfg.db_path.parent / "backups")
     with pytest.raises(RuntimeError, match="fewer rows"):
-        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5})
+        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5}, 5)
 
 
 def test_cli_offline_commands(env, capsys):
@@ -505,23 +489,43 @@ def test_cli_missing_key_fails_cleanly(env, monkeypatch, capsys):   # ABSENT sec
 def patched_main(monkeypatch, fake):
     import collector.__main__ as m
     real = m.Fetcher
-    monkeypatch.setattr(m, "Fetcher", lambda con, archive: real(con, archive, transport=fake, sleep=lambda s: None))
+    monkeypatch.setattr(m, "Fetcher", lambda con, archive, secrets=(): real(con, archive, transport=fake,
+                                                                           sleep=lambda s: None, secrets=secrets))
     return m.main
 
 
 def test_cli_day1_check_fixture(env, monkeypatch, capsys):
     cfg, con, fake, f = env
-    rec = lambda t, p: {"createdAt": t, "price": p, "limit": 1, "active": True}  # noqa: E731
+    rec = lambda t, p, a=True: {"createdAt": t, "price": p, "limit": 1, "active": a}  # noqa: E731
     body = {"fixtureId": "id1000001772221292", "bookmakers": {"pinnacle": {"markets": {
-        "101": {"outcomes": {"101": {"players": {"0": [rec("2026-10-10T13:50:00Z", 2.0),
-                                                        rec("2026-10-10T13:59:00Z", 2.05)]}}}}}}}}
+        "101": {"outcomes": {"101": {"players": {"0": [rec("2026-10-10T11:20:00Z", 2.0),
+                                                        rec("2026-10-10T11:29:00Z", 2.05),     # inside the 2-min buffer
+                                                        rec("2026-10-10T11:40:00Z", 6.00)]}}}}}}}}  # in-play
     fake.add("/v4/historical-odds", {"fixtureId": "id1000001772221292", "bookmakers": "pinnacle"}, (200, body))
     main = patched_main(monkeypatch, fake)
     rc = main(["--config", str(cfg.db_path.parent.parent / "config.toml"), "op-check-fixture",
-               "id1000001772221292", "--kickoff", "2026-10-10T14:00:00Z"])
+               "id1000001772221292", "--kickoff", "2026-10-10T11:30:00Z"])
     out_ = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out_["records_in_final_60_min"] == 2 and out_["last_record_before_kickoff_min"] == 1.0
+    assert rc == 0 and out_["rule"] == "close-v1"
+    assert out_["series_with_close"] == 1
+    assert out_["records_in_buffer"] == 1 and out_["records_at_or_after_cutoff"] == 2
+    assert out_["close_age_last_record_min"]["median"] == 8.0      # 11:28 cutoff - 11:20 record
     assert (cfg.review_dir / "check_id1000001772221292.json").exists()
+
+
+def test_cli_bootstrap_catalogs_unnamed_books(env, monkeypatch, capsys):
+    cfg, con, fake, f = env
+    fake.add("/status", {}, (200, af_page({"subscription": {"plan": "Pro"}})))
+    fake.add("/odds/bookmakers", {}, (200, af_page([{"id": 4, "name": "Pinnacle"}, {"id": 99, "name": None}])))
+    fake.add("/odds/bets", {}, (200, af_page([{"id": 1, "name": "Match Winner"}])))
+    main = patched_main(monkeypatch, fake)
+    rc = main(["--config", str(cfg.db_path.parent.parent / "config.toml"), "af-bootstrap"])
+    out_ = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out_["unnamed_bookmaker_ids"] == [99]
+    assert con.execute("SELECT provider_book_name FROM provider_book_catalog WHERE provider_book_key='99'").fetchone() == (None,)
+    con.execute("INSERT INTO bookmaker VALUES (99, 'Unknown 99', 'observed')")
+    with pytest.raises(sqlite3.IntegrityError, match="latest catalog name is empty"):
+        con.execute("INSERT INTO provider_bookmaker_map VALUES ('api_football', '99', 99, ?)", ("c" * 40,))
 
 
 def test_cli_bootstrap_reports_pinnacle(env, monkeypatch, capsys):

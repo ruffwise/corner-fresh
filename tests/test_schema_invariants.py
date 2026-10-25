@@ -51,12 +51,18 @@ class World:
         c.executemany("INSERT INTO provider VALUES (?,?,?)", [
             ("api_football", 1, "api-football Pro"), ("oddspapi", 0, "OddsPapi free tier")])
         c.executemany("INSERT INTO endpoint_allowlist VALUES (?,?,?)", [
-            ("api_football", "/fixtures", 1), ("api_football", "/odds", 1),
+            ("api_football", "/fixtures", 1), ("api_football", "/odds", 1), ("api_football", "/odds/bookmakers", 1),
             ("oddspapi", "/v4/fixtures", 1), ("oddspapi", "/v4/historical-odds", 0),
             ("oddspapi", "/v4/account", 0)])
         c.execute("INSERT INTO league VALUES (39, 2026, 'Premier League', 'England', 'League')")
         c.execute("INSERT INTO team VALUES (1,'Home FC'),(2,'Away FC'),(3,'Third FC')")
         c.execute("INSERT INTO bookmaker VALUES (4,'Pinnacle','reference_primary'),(8,'Bet365','observed')")
+        self.slot_cat = self.slot("af_bootstrap", T0 - 5 * MIN)
+        self.req_cat = self.request(self.slot_cat, "/odds/bookmakers", "")
+        self.raw_cat = self.raw(self.req_cat, 1, 1, T0 - 5 * MIN)
+        c.executemany("INSERT INTO provider_book_catalog VALUES (?,?,?,?)", [
+            ("api_football", "4", "Pinnacle", self.raw_cat), ("api_football", "8", "Bet365", self.raw_cat),
+            ("oddspapi", "pinnacle", "pinnacle", self.raw_cat)])
         c.executemany("INSERT INTO provider_bookmaker_map VALUES (?,?,?,?)", [
             ("api_football", "4", 4, COMMIT), ("api_football", "8", 8, COMMIT),
             ("oddspapi", "pinnacle", 4, COMMIT)])
@@ -142,8 +148,9 @@ class World:
         self.op_slot = self.slot("op_history", NOW - 5 * MIN)
         req = self.request(self.op_slot, "/v4/fixtures", "tournamentId=17", provider="oddspapi")
         self.op_raw_fx = self.raw(req, 1, None, NOW - 5 * MIN, paged=0)
-        self.con.execute("INSERT INTO provider_fixture_candidate VALUES ('oddspapi','idX',?, '17', ?, ?,"
-                         " 'Home FC', 'Away FC', ?, '2')", (self.op_raw_fx, home_key, away_key, start_ms))
+        self.con.execute("INSERT INTO provider_fixture_candidate (provider, provider_fixture_id, raw_id, tournament_key,"
+                         " home_team_key, away_team_key, home_team_name, away_team_name, start_ms, status_key)"
+                         " VALUES ('oddspapi','idX',?, '17', ?, ?, 'Home FC', 'Away FC', ?, '2')", (self.op_raw_fx, home_key, away_key, start_ms))
         req_h = self.request(self.op_slot, "/v4/historical-odds", "fixtureId=idX", provider="oddspapi")
         self.op_raw_h = self.raw(req_h, 1, None, NOW - 4 * MIN, paged=0)
         self.con.execute("INSERT INTO parse_run (parse_run_id, provider, kind, parser_git_commit, started_at_ms)"
@@ -493,8 +500,9 @@ def test_mapping_one_to_one_provider_side(w):
 def test_mapping_one_to_one_fixture_side(w):
     w.op_world()
     w.op_map()
-    w.con.execute("INSERT INTO provider_fixture_candidate VALUES ('oddspapi','idY',?, '17', '17', '44',"
-                  " 'Home FC', 'Away FC', ?, '2')", (w.op_raw_fx, KO_PAST))
+    w.con.execute("INSERT INTO provider_fixture_candidate (provider, provider_fixture_id, raw_id, tournament_key,"
+                  " home_team_key, away_team_key, home_team_name, away_team_name, start_ms, status_key)"
+                  " VALUES ('oddspapi','idY',?, '17', '17', '44', 'Home FC', 'Away FC', ?, '2')", (w.op_raw_fx, KO_PAST))
     with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
         w.op_map(pid="idY")
 
@@ -502,8 +510,9 @@ def test_mapping_one_to_one_fixture_side(w):
 def test_mapping_revocation_frees_fixture_for_reissued_id(w):
     w.op_world()
     w.op_map()
-    w.con.execute("INSERT INTO provider_fixture_candidate VALUES ('oddspapi','idY',?, '17', '17', '44',"
-                  " 'Home FC', 'Away FC', ?, '2')", (w.op_raw_fx, KO_PAST))
+    w.con.execute("INSERT INTO provider_fixture_candidate (provider, provider_fixture_id, raw_id, tournament_key,"
+                  " home_team_key, away_team_key, home_team_name, away_team_name, start_ms, status_key)"
+                  " VALUES ('oddspapi','idY',?, '17', '17', '44', 'Home FC', 'Away FC', ?, '2')", (w.op_raw_fx, KO_PAST))
     w.con.execute("UPDATE provider_fixture_map SET revoked=1, revoked_reason='reissued as idY'"
                   " WHERE provider_fixture_id='idX'")
     w.op_map(pid="idY")
@@ -571,29 +580,130 @@ def test_history_record_from_the_future_fires(w):
         w.hist(valid_from=NOW + 60 * MIN)
 
 
-def test_close_is_last_active_pre_kickoff_record(w):
+def finished(w, fid=2001, status="FT", first_half=None):
+    w.con.execute("INSERT INTO fixture_state_obs (fixture_id, raw_id, observed_at_ms, kickoff_ms, status_short)"
+                  " VALUES (?, ?, ?, ?, ?)", (fid, w.op_raw_fx, NOW - 2 * MIN, KO_PAST, status))
+    w.con.execute("INSERT INTO outcome_obs (fixture_id, source, raw_id, recorded_at_ms, status_short, goals_home_90,"
+                  " goals_away_90, first_half_start_ms) VALUES (?, 'api_football', ?, ?, ?, 1, 0, ?)",
+                  (fid, w.op_raw_fx, NOW - MIN, status, first_half))
+
+
+def cutoff_row(w, cutoff, reason=None, af_first=None, op_true=None, status="FT", basis="test"):
+    w.con.execute("INSERT INTO close_cutoff VALUES (2001, 'close-v1', ?, ?, ?, ?, ?, ?, ?, ?)",
+                  (KO_PAST, af_first, op_true, status, cutoff, reason, basis, NOW))
+
+
+def close_world(w):
     w.op_world()
     w.op_map()
     w.hist(price=1.80, valid_from=KO_PAST - 300 * MIN)
-    w.hist(price=1.95, valid_from=KO_PAST - 20 * MIN)
-    w.hist(price=2.10, valid_from=KO_PAST - 5 * MIN, active=0)       # suspended: not the close
-    w.hist(price=2.50, valid_from=KO_PAST + 10 * MIN)                 # in-play: not the close
-    w.hist(value="1011", selection="under", price=1.92, valid_from=KO_PAST - 2 * MIN)
-    complete_run(w.con, 5, run=2)
-    w.con.execute("UPDATE parse_run SET is_current=1 WHERE parse_run_id=2")
-    rows = dict((r[0], r[1:]) for r in w.con.execute(
-        "SELECT selection, close_price, market_age_at_ko_ms, book_silence_at_ko_ms FROM v_close"))
-    assert rows["over"] == (1.95, 20 * MIN, 2 * MIN)
-    assert rows["under"] == (1.92, 2 * MIN, 2 * MIN)
+    h_close = w.hist(price=1.95, valid_from=KO_PAST - 20 * MIN)
+    h_buf = w.hist(price=2.05, valid_from=KO_PAST - 1 * MIN)            # inside the 2-min buffer
+    h_live = w.hist(price=2.50, valid_from=KO_PAST + 10 * MIN)          # in-play
+    w.hist(value="1011", selection="under", price=1.92, valid_from=KO_PAST - 3 * MIN)
+    finished(w)
+    return h_close, h_buf, h_live
 
 
-def test_close_absent_when_no_pre_kickoff_record(w):    # ABSENT close must not be invented
+def close_sql():
+    return ("INSERT INTO close_price VALUES (2001, 'close-v1', 4, ?, 10, ?, ?, ?, ?, ?, ?, ?)")
+
+
+def test_close_cutoff_good_and_price_good(w):
+    h_close, _, _ = close_world(w)
+    cutoff_row(w, KO_PAST - 2 * MIN)
+    w.con.execute(close_sql(), (GOALS_FT, "over", h_close, 1.95, KO_PAST - 20 * MIN, KO_PAST - 20 * MIN,
+                                KO_PAST - 3 * MIN, NOW))
+
+
+def test_close_cutoff_wrong_arithmetic_fires(w):
+    close_world(w)
+    with pytest.raises(sqlite3.IntegrityError, match="min\\(present start sources\\) - buffer"):
+        cutoff_row(w, KO_PAST)                       # forgot the buffer
+
+
+def test_close_cutoff_ignoring_earlier_true_start_fires(w):
+    close_world(w)
+    with pytest.raises(sqlite3.IntegrityError, match="buffer"):
+        cutoff_row(w, KO_PAST - 2 * MIN, op_true=KO_PAST - 5 * MIN)   # cutoff must be KO-7min
+
+
+def test_close_cutoff_sources_disagree_must_exclude(w):
+    close_world(w)
+    with pytest.raises(sqlite3.IntegrityError, match="tolerance"):
+        cutoff_row(w, KO_PAST - 2 * MIN, op_true=KO_PAST + 30 * MIN)
+    cutoff_row(w, None, reason="start_sources_disagree", op_true=KO_PAST + 30 * MIN)
+
+
+def test_close_cutoff_af_first_half_must_match_outcome(w):
+    close_world(w)
+    with pytest.raises(sqlite3.IntegrityError, match="first|outcome"):
+        cutoff_row(w, KO_PAST - 4 * MIN, af_first=KO_PAST - 2 * MIN)   # outcome has no first-half start
+
+
+def test_close_cutoff_unfinished_must_exclude(w):
     w.op_world()
     w.op_map()
-    w.hist(price=2.50, valid_from=KO_PAST + 10 * MIN)
-    complete_run(w.con, 1, run=2)
-    w.con.execute("UPDATE parse_run SET is_current=1 WHERE parse_run_id=2")
-    assert w.con.execute("SELECT count(*) FROM v_close").fetchone()[0] == 0
+    w.con.execute("INSERT INTO fixture_state_obs (fixture_id, raw_id, observed_at_ms, kickoff_ms, status_short)"
+                  " VALUES (2001, ?, ?, ?, 'ABD')", (w.op_raw_fx, NOW - 2 * MIN, KO_PAST))
+    with pytest.raises(sqlite3.IntegrityError, match="unfinished"):
+        cutoff_row(w, KO_PAST - 2 * MIN, status="ABD")
+    cutoff_row(w, None, reason="status_not_finished", status="ABD")
+
+
+def test_close_price_inplay_record_fires(w):
+    _, _, h_live = close_world(w)
+    cutoff_row(w, KO_PAST - 2 * MIN)
+    with pytest.raises(sqlite3.IntegrityError, match="look-ahead"):
+        w.con.execute(close_sql(), (GOALS_FT, "over", h_live, 2.50, KO_PAST + 10 * MIN, KO_PAST + 10 * MIN,
+                                    KO_PAST + 10 * MIN, NOW))
+
+
+def test_close_price_buffer_record_fires(w):
+    _, h_buf, _ = close_world(w)
+    cutoff_row(w, KO_PAST - 2 * MIN)
+    with pytest.raises(sqlite3.IntegrityError, match="look-ahead"):
+        w.con.execute(close_sql(), (GOALS_FT, "over", h_buf, 2.05, KO_PAST - MIN, KO_PAST - MIN, KO_PAST - MIN, NOW))
+
+
+def test_close_price_stale_record_not_in_force_fires(w):
+    close_world(w)
+    h_old = w.con.execute("SELECT hist_id FROM price_history WHERE price=1.80").fetchone()[0]
+    cutoff_row(w, KO_PAST - 2 * MIN)
+    with pytest.raises(sqlite3.IntegrityError, match="not in force"):
+        w.con.execute(close_sql(), (GOALS_FT, "over", h_old, 1.80, KO_PAST - 300 * MIN, KO_PAST - 300 * MIN,
+                                    KO_PAST - 3 * MIN, NOW))
+
+
+def test_close_price_inactive_record_fires(w):
+    w.op_world()
+    w.op_map()
+    h = w.hist(price=1.95, valid_from=KO_PAST - 20 * MIN, active=0)
+    finished(w)
+    cutoff_row(w, KO_PAST - 2 * MIN)
+    with pytest.raises(sqlite3.IntegrityError, match="not active"):
+        w.con.execute(close_sql(), (GOALS_FT, "over", h, 1.95, KO_PAST - 20 * MIN, KO_PAST - 20 * MIN,
+                                    KO_PAST - 20 * MIN, NOW))
+
+
+def test_close_price_on_excluded_fixture_fires(w):
+    h_close, _, _ = close_world(w)
+    cutoff_row(w, None, reason="start_sources_disagree", op_true=KO_PAST + 30 * MIN)
+    with pytest.raises(sqlite3.IntegrityError, match="excluded"):
+        w.con.execute(close_sql(), (GOALS_FT, "over", h_close, 1.95, KO_PAST - 20 * MIN, KO_PAST - 20 * MIN,
+                                    KO_PAST - 3 * MIN, NOW))
+
+
+def test_close_price_wrong_book_silence_fires(w):
+    h_close, _, _ = close_world(w)
+    cutoff_row(w, KO_PAST - 2 * MIN)
+    with pytest.raises(sqlite3.IntegrityError, match="book_last_record_ms"):
+        w.con.execute(close_sql(), (GOALS_FT, "over", h_close, 1.95, KO_PAST - 20 * MIN, KO_PAST - 20 * MIN,
+                                    KO_PAST - 1 * MIN, NOW))   # counted the buffer record
+
+
+def test_close_rule_frozen(w):
+    fires(w.con, "UPDATE close_rule SET buffer_ms = 0", (), "frozen")
 
 
 # --- coverage ledger ---------------------------------------------------------------------------

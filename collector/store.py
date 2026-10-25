@@ -39,12 +39,24 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+class DatabaseMissing(RuntimeError):
+    pass
+
+
 def open_db(path: Path) -> sqlite3.Connection:
+    """Open the existing database. Never creates one: a mistyped or moved path must
+    fail loudly, not silently start a new empty database (an absent-data failure)."""
+    if not path.exists() or path.stat().st_size == 0:
+        raise DatabaseMissing(f"no database at {path}; run `init` once to create it")
+    return connect(path)
+
+
+def init_db(path: Path) -> sqlite3.Connection:
+    if path.exists() and path.stat().st_size > 0:
+        raise RuntimeError(f"{path} already exists; refusing to initialise over it")
     path.parent.mkdir(parents=True, exist_ok=True)
-    fresh = not path.exists() or path.stat().st_size == 0
-    con = connect(path, create=fresh)
-    if fresh:
-        seed(con)
+    con = connect(path, create=True)
+    seed(con)
     return con
 
 

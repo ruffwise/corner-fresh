@@ -27,6 +27,10 @@ COOLDOWN_S = {  # documented cooldowns plus a 20% margin
 FINISHED_STATUS_KEYS = {"2"}   # OddsPapi statusId 2 = finished (per GET fixtures docs)
 
 
+def iso_ms(s: str) -> int:
+    return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+
+
 class QuotaRefused(RuntimeError):
     pass
 
@@ -154,14 +158,18 @@ class OP:
         n = 0
         for it in items:
             try:
-                start = int(datetime.fromisoformat(it["startTime"].replace("Z", "+00:00")).timestamp() * 1000)
+                start = iso_ms(it["startTime"])
+                true_start = iso_ms(it["trueStartTime"]) if it.get("trueStartTime") else None
                 row = (PROVIDER, str(it["fixtureId"]), res.raw_id, str(it.get("tournamentId", tid)),
                        str(it["participant1Id"]), str(it["participant2Id"]), it["participant1Name"],
-                       it["participant2Name"], start, None if it.get("statusId") is None else str(it["statusId"]))
+                       it["participant2Name"], start, None if it.get("statusId") is None else str(it["statusId"]),
+                       true_start)
             except (KeyError, TypeError, ValueError):
                 continue   # shape drift: left in the raw archive for review
-            n += self.con.execute("INSERT OR IGNORE INTO provider_fixture_candidate VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                  row).rowcount
+            n += self.con.execute(
+                "INSERT OR IGNORE INTO provider_fixture_candidate (provider, provider_fixture_id, raw_id, tournament_key,"
+                " home_team_key, away_team_key, home_team_name, away_team_name, start_ms, status_key, true_start_ms)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)", row).rowcount
         return n
 
     # --- history (free) ----------------------------------------------------------------------------
