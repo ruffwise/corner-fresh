@@ -39,10 +39,12 @@ OddsPapi steps are held until the v0.5 redeploy (RUNBOOK Part A).
 ### 0.1 Redaction policy (`collector/redact.py`, policy `redact-v2`; v0.5.1)
 
 **Incident, 25 Oct.** Policy `redact-v1` applied field-name rules to every endpoint. The bare name `key` matched api-football's key-passes statistic (`passes.key`) in match-detail responses:
-- The v0.5 scrub rewrote 3 such records (raw ids 39–41), blanking 4,612 values, and deleted the originals.
-- Capture-time redaction blanked the same field in every match-detail response until the hotfix.
+- The v0.5 scrub rewrote 3 such records (raw ids 39–41), blanking 2,306 values, and deleted the originals.
+- Capture-time redaction then blanked the same field in the one match-detail response captured between the v0.5 deploy and the hotfix: raw id 387, the 11:35 UTC results run, 46 values.
+- Total: 4 records, 2,352 values. (An earlier draft of this note said 4,612 for 39–41; that figure counted the scrub's dry-run and apply listings together.)
 - No other field was hit. Odds, fixture lists, statistics and outcomes were unaffected.
-- **Repair:** every damaged response is identified from its own envelope or from `archive_rewrite`, and re-fetched as a new raw row linked in `raw_refetch`. The damaged rows stay as evidence. The original bytes of 39–41 are not recoverable.
+- **Repair:** every damaged response is identified from its own envelope or from `archive_rewrite`, and re-fetched as a new raw row linked in `raw_refetch`. The damaged rows stay as evidence. The original bytes of 39–41 are not recoverable; their re-fetches hold api-football's statistics as served on 25 Oct.
+- **Repaired 25 Oct** (hotfix deployed 12:24 UTC): `repair-damaged` dry run showed 4 rows, 2,352 values, the single pattern `passes.key`; apply re-fetched and linked all 4; `archive-verify` 457 checked, 0 problems, 0 unrepaired; scrub dry run 0 candidates; watchdog `missed []`.
 
 **Policy v2:**
 - **Personal endpoints** form a fixed list in the `personal_endpoint` table, which only a migration can change: api-football `/status` and OddsPapi `/v4/account`.

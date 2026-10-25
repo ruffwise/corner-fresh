@@ -10,10 +10,13 @@ Run all commands on the VM unless a step says otherwise. Replace `OWNER` with yo
 ## Part A-H — Hotfix v0.5.1: redaction destroyed key-passes data (do this before A10)
 
 **What went wrong.** v0.5 applied field-name redaction to every endpoint. The bare name `key` matched api-football's key-passes statistic (`passes.key`) in match-detail responses (`/fixtures?ids=`):
-- The v0.5 scrub rewrote raw ids 39–41 and deleted their originals.
-- Every hourly `af-results` run since the v0.5 deploy has archived match details with key passes blanked.
+- The v0.5 scrub rewrote raw ids 39–41 (2,306 values) and deleted their originals.
+- Capture-time redaction blanked key passes in the one match-detail response captured between the v0.5 deploy and the hotfix: raw id 387, the 11:35 UTC `af-results` run (46 values).
+- Total: 4 records, 2,352 values.
 
 Nothing else was hit: odds, fixture lists, statistics (corners) and outcomes are unaffected.
+
+**Record, 25 Oct.** H1–H7 done. Hotfix d401bc1 deployed 12:24 UTC (backup `corners-20261025T122405Z-pre-migrate-v5.db.gz`, restore test ok). `repair-damaged` showed 4 rows (39, 40, 41, 387), 2,352 values, one pattern; all 4 re-fetched and linked. `archive-verify`: 457 checked, 0 problems, 0 unrepaired. Scrub dry run: 0 candidates. Watchdog: `missed []`. H8 remains.
 
 **What v0.5.1 does:**
 - **Field rules run on two personal endpoints only.** `/status` and `/v4/account` are a fixed list, held in a database table that only a migration can change.
