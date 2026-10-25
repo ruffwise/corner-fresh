@@ -21,7 +21,8 @@ REPO=$BASE/repo
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 
 git -C "$REPO" fetch --quiet --tags origin
-SHA=$(git -C "$REPO" rev-parse --verify "$REF^{commit}")
+# A branch name resolves to the freshly fetched remote branch, never a stale local one.
+SHA=$(git -C "$REPO" rev-parse --verify --quiet "origin/$REF^{commit}" || git -C "$REPO" rev-parse --verify "$REF^{commit}")
 SHORT=${SHA:0:12}
 REL=$BASE/releases/$SHORT
 echo "== release $SHORT ($REF)"
