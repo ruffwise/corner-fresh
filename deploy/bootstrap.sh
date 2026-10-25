@@ -29,10 +29,13 @@ RCLONE_REMOTE=
 SECRETS
 fi
 
-# Code: the repository is expected at /opt/corners/app (git clone done by you).
-test -f /opt/corners/app/collector/__main__.py || { echo "clone the repo to /opt/corners/app first"; exit 1; }
-chown -R corners:corners /opt/corners/app
-[ -f /opt/corners/config.toml ] || install -o corners -g corners -m 640 /opt/corners/app/deploy/config.example.toml /opt/corners/config.toml
+# Code: a root-owned git clone at /opt/corners/repo; releases are built from it by
+# deploy/release.sh into root-owned, read-only directories. The corners user can
+# read the code it runs but never modify it.
+test -d /opt/corners/repo/.git || { echo "clone the repo to /opt/corners/repo first (as root)"; exit 1; }
+chown -R root:root /opt/corners/repo
+install -d -o root -g root -m 755 /opt/corners/releases
+chown root:corners /opt/corners && chmod 750 /opt/corners
 
 python3 - <<'PY'
 import sqlite3, sys
@@ -40,7 +43,11 @@ v = tuple(map(int, sqlite3.sqlite_version.split(".")))
 sys.exit(0 if v >= (3, 42, 0) else f"SQLite {sqlite3.sqlite_version} too old (need 3.42+)")
 PY
 
-cp /opt/corners/app/deploy/corners@.service /opt/corners/app/deploy/corners-*.timer \
-   /opt/corners/app/deploy/corners-backup.service /etc/systemd/system/
-systemctl daemon-reload
-echo "Installed. Next: fill /etc/corners/secrets.env, then follow RUNBOOK.md step 4 (day-1 checks) BEFORE enabling timers."
+# Swap: the collector peaks well under 200 MB, but a 1 GB VM should still have swap.
+if ! swapon --show | grep -q .; then
+  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+echo "Installed base packages. Next: fill /etc/corners/secrets.env, then run"
+echo "  sudo bash /opt/corners/repo/deploy/release.sh main"
+echo "  sudo -u corners python3 -m collector --config /opt/corners/app/config/production.toml init   (fresh install only)"

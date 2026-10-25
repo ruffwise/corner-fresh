@@ -593,3 +593,26 @@ def test_cli_op_fixtures_relists_when_candidates_absent_and_alerts(env, monkeypa
 def test_no_alert_when_nothing_upcoming(env):                       # ABSENT fixtures: no false alarm
     cfg, con, fake, f = env
     assert mapping.unmapped_upcoming(cfg, con)["17"]["alert"] is False
+
+
+def test_load_teams_reads_committed_bytes_not_working_copy(env, tmp_path):
+    import subprocess
+    cfg, con, fake, f = env
+    repo = tmp_path / "repo"
+    (repo / "review").mkdir(parents=True)
+    g = ["git", "-C", str(repo)]
+    subprocess.run(g + ["init", "-q"], check=True)
+    csv_text = ("provider,provider_team_key,provider_team_name,team_id,af_team_name,supporting_fixtures,conflicts\n"
+                "oddspapi,17,Home FC,1,Home FC,3,\n")
+    (repo / "review" / "t.csv").write_text(csv_text)
+    con.execute("INSERT INTO team VALUES (1,'Home FC'),(2,'Away FC')")
+    subprocess.run(g + ["add", "-A"], check=True)
+    subprocess.run(g + ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "map"], check=True)
+    sha = subprocess.run(g + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    (repo / "review" / "t.csv").write_text(csv_text + "oddspapi,44,Away FC,2,Away FC,3,\n")   # uncommitted edit
+    assert mapping.load_teams_from_git(con, repo, sha, "review/t.csv") == 1
+    assert con.execute("SELECT approved_in_commit FROM provider_team_map").fetchall() == [(sha,)]
+    with pytest.raises(ValueError):
+        mapping.load_teams_from_git(con, repo, sha[:12], "review/t.csv")
+    with pytest.raises(subprocess.CalledProcessError):
+        mapping.load_teams_from_git(con, repo, "f" * 40, "review/t.csv")

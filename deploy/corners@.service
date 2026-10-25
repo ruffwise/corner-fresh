@@ -7,15 +7,22 @@ Wants=network-online.target
 Type=oneshot
 User=corners
 Group=corners
+# /opt/corners/app is a symlink to a root-owned, read-only release directory.
 WorkingDirectory=/opt/corners/app
 EnvironmentFile=/etc/corners/secrets.env
-ExecStart=/usr/bin/python3 -m collector --config /opt/corners/config.toml %i
+ExecStart=/usr/bin/python3 -m collector --config /opt/corners/app/config/production.toml %i
 # Exit 3 = previous run of the same command still active (lock held): not a failure.
 SuccessExitStatus=3
 TimeoutStartSec=55min
 Nice=5
 Environment=PYTHONDONTWRITEBYTECODE=1
+MemoryAccounting=yes
+# Measured: ~26 MB to parse and close-report a 59k-record history payload (7 MB JSON);
+# the whole process is expected well under 200 MB. The cap turns a runaway into a
+# failed, visible slot instead of an OOM-killed VM.
+MemoryMax=700M
 NoNewPrivileges=yes
 ProtectSystem=strict
+ProtectHome=yes
 ReadWritePaths=/opt/corners/data
 PrivateTmp=yes

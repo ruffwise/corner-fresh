@@ -70,9 +70,9 @@ def main(argv=None) -> int:
     p.add_argument("--max", type=int, default=1500)
     p = sub.add_parser("op-backfill")
     p.add_argument("--max", type=int, default=600)
-    p = sub.add_parser("map-load-teams")
-    p.add_argument("csv")
-    p.add_argument("commit")
+    p = sub.add_parser("map-load-teams", help="load a reviewed team CSV exactly as committed in git")
+    p.add_argument("commit", help="full 40-character commit hash")
+    p.add_argument("path_in_repo", help="e.g. review/team_map_v1.csv")
     a = ap.parse_args(argv)
 
     cfg = load(a.config)
@@ -294,9 +294,11 @@ def mapping_cmd(cfg, con, a) -> int:
     if a.cmd == "map-propose":
         path = cfg.review_dir / "team_map_proposals.csv"
         out({"proposed_rows": mapping.propose_teams(cfg, con, path), "csv": str(path),
-             "next": "review the CSV, delete wrong rows, commit it, then run map-load-teams <csv> <commit>"})
+             "next": "review the CSV, delete wrong rows, commit it under review/, then run "
+                     "map-load-teams <commit> review/<file>.csv"})
     elif a.cmd == "map-load-teams":
-        out({"loaded": mapping.load_teams(con, Path(a.csv), a.commit)})
+        out({"loaded": mapping.load_teams_from_git(con, cfg.repo_dir, a.commit, a.path_in_repo),
+             "from": f"{a.commit}:{a.path_in_repo}"})
     elif a.cmd == "map-apply":
         out(mapping.apply(cfg, con))
     elif a.cmd == "map-audit":

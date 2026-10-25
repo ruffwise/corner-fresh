@@ -91,19 +91,39 @@ def propose_teams(cfg: Config, con: sqlite3.Connection, out: Path, provider: str
     return n
 
 
+def load_teams_from_git(con: sqlite3.Connection, repo: Path, commit: str, path_in_repo: str) -> int:
+    """Load the reviewed CSV exactly as committed: the bytes come from git, not from a
+    working copy that could differ from what the commit hash claims."""
+    import subprocess
+    if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        raise ValueError("commit must be the full 40-character lower-case git hash")
+    git = ["git", "-c", f"safe.directory={repo}", "-C", str(repo)]
+    subprocess.run(git + ["cat-file", "-e", f"{commit}^{{commit}}"], check=True, capture_output=True)
+    blob = subprocess.run(git + ["show", f"{commit}:{path_in_repo}"], check=True, capture_output=True).stdout
+    return _load_rows(con, blob.decode("utf-8").splitlines(), commit)
+
+
 def load_teams(con: sqlite3.Connection, path: Path, commit: str) -> int:
     if len(commit) != 40:
         raise ValueError("commit must be the full 40-character git hash that contains the reviewed CSV")
+    with open(path, newline="") as fh:
+        return _load_rows(con, fh.read().splitlines(), commit)
+
+
+def _load_rows(con: sqlite3.Connection, lines: list[str], commit: str) -> int:
     n = 0
     con.execute("BEGIN")
-    with open(path, newline="") as fh:
-        for row in csv.DictReader(fh):
+    try:
+        for row in csv.DictReader(lines):
             if row.get("conflicts"):
                 raise ValueError(f"row for {row['provider_team_key']} still lists conflicts: resolve before loading")
             con.execute("INSERT INTO provider_team_map VALUES (?,?,?,?,?)",
                         (row["provider"], row["provider_team_key"], row["provider_team_name"],
                          int(row["team_id"]), commit))
             n += 1
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
     con.execute("COMMIT")
     return n
 

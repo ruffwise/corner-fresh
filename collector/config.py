@@ -20,6 +20,7 @@ class Config:
     archive_dir: Path
     review_dir: Path
     leagues: tuple[League, ...]
+    repo_dir: Path = Path("/opt/corners/repo")
     af_base: str = "https://v3.football.api-sports.io"
     af_key: str = ""
     af_odds_horizon_days: int = 14
@@ -57,6 +58,7 @@ def load(path: str | Path) -> Config:
         archive_dir=(base / raw.get("archive_dir", "data/archive")).resolve(),
         review_dir=(base / raw.get("review_dir", "data/review")).resolve(),
         leagues=leagues,
+        repo_dir=Path(raw.get("repo_dir", "/opt/corners/repo")),
         af_base=af.get("base", Config.af_base),
         af_key=os.environ.get("AF_KEY", ""),
         af_odds_horizon_days=int(af.get("odds_horizon_days", 14)),

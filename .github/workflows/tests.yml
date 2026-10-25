@@ -1,0 +1,15 @@
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04          # SQLite 3.45, same family as the VM
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -c "import sqlite3; print(sqlite3.sqlite_version)"
+      - run: pip install pytest numpy scipy
+      - run: python -m pytest -q

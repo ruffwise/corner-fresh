@@ -1,11 +1,13 @@
-# Non-secret settings. Keys live in /etc/corners/secrets.env (AF_KEY, OP_KEY).
-db_path = "data/corners.db"           # relative to this file's directory (/opt/corners)
-archive_dir = "data/archive"
-review_dir = "data/review"
+# PRODUCTION configuration, tracked in git: every change is a commit, which is
+# the record of what was collected when. Keys live in /etc/corners/secrets.env.
+# Paths are absolute so this file can live inside a read-only release directory.
+db_path = "/opt/corners/data/corners.db"
+archive_dir = "/opt/corners/data/archive"
+review_dir = "/opt/corners/data/review"
 
 # Leagues to track. api-football ids; season = starting year (2026 = 2026/27).
-# oddspapi_tournament_id is filled in on day 1 from data/review/day1_oddspapi_tournaments.json,
-# by hand, and committed. Until then OddsPapi listing/history skips that league.
+# oddspapi_tournament_id: fill in from data/review/day1_oddspapi_tournaments.json
+# (RUNBOOK R8), commit, and deploy. Until then OddsPapi skips that league.
 # The default set is broader than EPL/Championship/UCL because the power
 # estimate (DESIGN v0.4 §8) depends on fixtures per week. Trim it if you prefer.
 [[leagues]]
