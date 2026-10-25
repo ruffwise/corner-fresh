@@ -1,9 +1,116 @@
-# Runbook v0.5
+# Runbook v0.5.1
 
 **Part A** redeploys v0.5 over the running v0.4 install. The af-odds timer is never stopped, and no data is lost.
 **Part B** is a fresh install, for reference.
 
 Run all commands on the VM unless a step says otherwise. Replace `OWNER` with your GitHub user or organisation.
+
+---
+
+## Part A-H — Hotfix v0.5.1: redaction destroyed key-passes data (do this before A10)
+
+**What went wrong.** v0.5 applied field-name redaction to every endpoint. The bare name `key` matched api-football's key-passes statistic (`passes.key`) in match-detail responses (`/fixtures?ids=`):
+- The v0.5 scrub rewrote raw ids 39–41 and deleted their originals.
+- Every hourly `af-results` run since the v0.5 deploy has archived match details with key passes blanked.
+
+Nothing else was hit: odds, fixture lists, statistics (corners) and outcomes are unaffected.
+
+**What v0.5.1 does:**
+- **Field rules run on two personal endpoints only.** `/status` and `/v4/account` are a fixed list, held in a database table that only a migration can change.
+- **Data endpoints are never changed by field rules.** Only a live API key found in a data response is replaced, and that fires an alert.
+- **Every rule that fires is counted per response.** The watchdog alerts if anything fires on a data endpoint, and the daily report shows the counts.
+- **The scrub is restricted.** It refuses data records (also enforced by the schema), needs `--expect`, and moves originals aside instead of deleting them.
+- **`repair-damaged` re-fetches every damaged response** as a new raw row, linked to the damaged one. The damaged rows stay as evidence.
+
+**What can't be undone.** The original bytes of raw ids 39–41 are gone. The re-fetch records api-football's current final statistics for the same matches.
+
+### H1. Bring the hotfix into your clone and push (as `azureuser`)
+
+1. Copy the new bundle to the VM (from your PC):
+   ```bash
+   scp corner-fresh.bundle azureuser@<vm>:~/corner-fresh-v051.bundle
+   ```
+2. On the VM, as `azureuser`:
+   ```bash
+   cd ~/corner-fresh
+   git fetch ~/corner-fresh-v051.bundle main
+   git merge --ff-only FETCH_HEAD
+   git log --oneline | head -3        # top line should read "Hotfix v0.5.1: ..."
+   git push
+   ```
+
+### H2. Deploy
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh main
+```
+
+**Expected:**
+- `migrated` is `[6]`;
+- the backup path ends `-pre-migrate-v5.db.gz`;
+- `backup_restore_test` is `ok`.
+
+This deploy stops new damage.
+
+### H3. Damage dry run
+
+```bash
+sudo /opt/corners/app/deploy/run.sh repair-damaged
+```
+
+**Expected:**
+- `per_endpoint` has exactly one key, `api_football /fixtures`;
+- its `patterns` has exactly one key, `$.response[*].players[*].players[*].statistics[*].passes.key`;
+- `damaged_rows` is 3 (raw ids 39–41), plus one for each match-detail response captured since the v0.5 deploy.
+
+**If any other endpoint or pattern appears, stop and send me the output.**
+
+### H4. Re-fetch
+
+```bash
+sudo /opt/corners/app/deploy/run.sh repair-damaged --apply --expect <damaged_rows from H3>
+```
+
+**Expected:** `linked` equals `damaged_rows`. `distinct_requests` can be smaller, because several damaged rows may share one id batch.
+
+This costs one api-football request per distinct id batch, which is trivial against 7,500 a day.
+
+### H5. Verify
+
+```bash
+sudo /opt/corners/app/deploy/run.sh archive-verify
+```
+
+**Expected:** `problem_count` is 0 and `damaged_unrepaired` is 0.
+
+### H6. Scrub check (no rewrite expected)
+
+```bash
+sudo /opt/corners/app/deploy/run.sh archive-scrub
+```
+
+**Expected:** `rewrite_candidates` is 0, and `refused_data_endpoint_records` is empty. Raw ids 1 and 35 were already rewritten on 25 Oct.
+
+### H7. Watchdog
+
+```bash
+sudo /opt/corners/app/deploy/run.sh watchdog
+```
+
+**Expected:** `"missed": []`. No `redaction_on_data_endpoint` entries.
+
+### H8. Next morning
+
+```bash
+sudo /opt/corners/app/deploy/run.sh report
+```
+
+**Expected:**
+- `redaction_last_24h` lists `field:` rules only against `api_football /status` and `oddspapi /v4/account`;
+- `redaction_alerts_last_24h` is 0;
+- `damaged_unrepaired` is 0.
+
+Then continue with **A10**.
 
 ---
 
@@ -119,24 +226,34 @@ sudo /opt/corners/app/deploy/run.sh report
 journalctl -u corners@af-odds --since -2h | tail -5
 ```
 
-### A6. Scrub the pre-fix archive
+### A6. Scrub the pre-fix archive (scrub v2 procedure)
 
-1. Dry run. It should list 2 rows from `/status`, with paths like `$.response.account.email`:
+*Done on 25 Oct with the v0.5 scrub, which also damaged three data records. The hotfix (H1–H8) repairs them. For any future scrub, use this procedure.*
+
+1. **Dry run.** It touches only personal endpoints, and prints a per-endpoint summary:
    ```bash
    sudo /opt/corners/app/deploy/run.sh archive-scrub
    ```
-2. Apply it, then verify:
+   **Stop and send me the output** in any of these cases:
+   - `per_endpoint` lists anything other than `api_football /status` or `oddspapi /v4/account`;
+   - `refused_data_endpoint_records` is not empty;
+   - `rewrite_candidates` differs from what you expected.
+2. **Apply**, passing the exact count from the dry run:
    ```bash
-   sudo /opt/corners/app/deploy/run.sh archive-scrub --apply
+   sudo /opt/corners/app/deploy/run.sh archive-scrub --apply --expect <rewrite_candidates>
    sudo /opt/corners/app/deploy/run.sh archive-verify
    ```
-   `archive-verify` should report `"problem_count": 0`.
-3. Re-run the bootstrap:
+   Originals are **moved** to `/opt/corners/data/superseded/`, not deleted. That folder is outside the archive, so it is never synced off-box. `archive-verify` lists them under `superseded_originals_pending`.
+3. **Check one rewritten record**, then delete the originals:
+   ```bash
+   sudo /opt/corners/app/deploy/run.sh archive-finalize --raw-ids <ids> --confirmed-by "<your name>"
+   ```
+4. Re-run the bootstrap:
    ```bash
    sudo /opt/corners/app/deploy/run.sh af-bootstrap
    ```
-   This overwrites the review file with a redacted copy, and fills the new bookmaker catalog. `unnamed_bookmaker_ids` lists the null-named entry (or entries).
-4. Confirm nothing personal is left:
+   This refreshes the redacted review file and fills the bookmaker catalog.
+5. Confirm nothing personal is left:
    ```bash
    sudo -u corners grep -rl '@' /opt/corners/data/review/ || echo "no email addresses in review files"
    ```
@@ -300,6 +417,8 @@ From now on, `op-fixtures` runs `map-apply` itself. It alerts (exit 4, healthche
    ```bash
    cd ~/corner-fresh && git add tests/fixtures/real && git commit -m "tests: real payloads for every endpoint" && git push
    ```
+
+The export never includes a response damaged by redact-v1. It needs one match-detail response (`/fixtures?ids=`) from a finished match captured **after** the hotfix. If `missing_endpoints` lists `api_football /fixtures?ids`, wait for the next `af-results` run and export again.
 
 Until this step is done, CI fails one test, `test_every_endpoint_has_a_real_payload`, on purpose. An absent fixture must not pass.
 

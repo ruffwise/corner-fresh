@@ -46,20 +46,40 @@ def of(provider, endpoint):
     return [(p, m, b) for p, m, b in PAYLOADS if m["provider"] == provider and m["endpoint"] == endpoint]
 
 
+def key_of(m):
+    if m["endpoint"] == "/fixtures" and "ids" in m.get("params", {}):
+        return (m["provider"], "/fixtures?ids")
+    return (m["provider"], m["endpoint"])
+
+
 def test_every_endpoint_has_a_real_payload():
-    have = {(m["provider"], m["endpoint"]) for _, m, _ in PAYLOADS}
+    have = {key_of(m) for _, m, _ in PAYLOADS}
     missing = [f"{p} {e}" for p, e in REQUIRED_ENDPOINTS if (p, e) not in have]
     assert not missing, ("no real payload committed for: " + ", ".join(missing) +
                          ". Run `run.sh export-fixtures` on the VM (RUNBOOK §R6) and commit the files.")
 
 
 @pytest.mark.parametrize("item", PAYLOADS, ids=lambda x: x[0].name)
-def test_redaction_never_alters_data_endpoints(item):
+def test_redaction_leaves_real_data_byte_identical(item):
+    """The v0.5 failure: a field rule ("key") matched passes.key in match detail.
+    Every real data payload must pass through redaction byte-identical."""
     path, meta, body = item
     if (meta["provider"], meta["endpoint"]) in ACCOUNT_ENDPOINTS:
         return
-    r = redact(json.dumps(body).encode(), (AF_KEY, OP_KEY))
-    assert r.paths == [], f"redaction would change data fields {r.paths[:5]} in {path.name}"
+    raw = json.dumps(body).encode()
+    r = redact(raw, (AF_KEY, OP_KEY), meta["provider"], meta["endpoint"])
+    assert r.body is raw and r.paths == [], f"redaction would change {r.paths[:5]} in {path.name}"
+    assert not [k for k in r.rules if k.startswith(("field:", "value:", "bytes:"))]
+
+
+@pytest.mark.parametrize("item", [x for x in PAYLOADS if key_of(x[1]) == ("api_football", "/fixtures?ids")],
+                         ids=lambda x: x[0].name)
+def test_real_match_detail_keeps_key_passes(item):
+    _, meta, body = item
+    keys = [p["statistics"][0]["passes"].get("key") for it in body["response"] for t in it.get("players", [])
+            for p in t.get("players", []) if p.get("statistics")]
+    assert keys, "match detail without player statistics: export a finished match"
+    assert MARK not in keys and any(isinstance(k, int) for k in keys)
 
 
 @pytest.mark.parametrize("item", of("api_football", "/status") + of("oddspapi", "/v4/account"),

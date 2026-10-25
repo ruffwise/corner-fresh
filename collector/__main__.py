@@ -26,7 +26,7 @@ from .store import Archive, init_db, now_ms, open_db, seed
 JOB_OF = {"af-fixtures": "af_fixtures", "af-odds": "af_odds", "af-results": "af_results",
           "op-account": "op_account", "op-fixtures": "op_fixtures", "op-history": "op_history",
           "af-bootstrap": "af_bootstrap", "op-catalog": "op_catalog", "op-check-fixture": "op_history",
-          "op-backfill": "op_backfill", "af-backfill": "af_results"}
+          "op-backfill": "op_backfill", "af-backfill": "af_results", "repair-damaged": "af_results"}
 
 
 def ping(cfg, cmd: str, suffix: str = "") -> None:
@@ -47,9 +47,16 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="collector")
     ap.add_argument("--config", default="config.toml")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("archive-scrub", help="redact secrets/personal data from already-archived bodies")
+    p = sub.add_parser("archive-scrub", help="redact personal data from already-archived PERSONAL-endpoint bodies")
     p.add_argument("--apply", action="store_true", help="rewrite (default: dry run)")
+    p.add_argument("--expect", type=int, help="required with --apply: the rewrite count the dry run printed")
+    p = sub.add_parser("archive-finalize", help="delete superseded originals after you have checked the rewrites")
+    p.add_argument("--raw-ids", required=True, help="comma-separated raw ids")
+    p.add_argument("--confirmed-by", required=True)
     sub.add_parser("archive-verify")
+    p = sub.add_parser("repair-damaged", help="re-fetch responses whose data was altered by redact-v1 (dry run by default)")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--expect", type=int, help="required with --apply: the damaged-row count the dry run printed")
     p = sub.add_parser("export-fixtures", help="copy redacted real payloads into tests/fixtures/real for the test suite")
     p.add_argument("--out", required=True)
     p.add_argument("--history", action="append", default=[], metavar="FIXTUREID=ISO_KICKOFF")
@@ -100,6 +107,9 @@ def main(argv=None) -> int:
         return 0
     if a.cmd == "watchdog":
         missed = ledger.watchdog(con)
+        missed += [(f"redaction_on_data_endpoint:{r[1]} {r[2]}:{r[3]}", r[0]) for r in con.execute(
+            "SELECT raw_id, provider, endpoint, rule FROM v_redaction_alerts WHERE received_at_ms > ?",
+            (now_ms() - 86_400_000,))]
         out({"missed": missed})
         if missed:
             ping(cfg, "watchdog", "/fail")
@@ -113,7 +123,27 @@ def main(argv=None) -> int:
         return mapping_cmd(cfg, con, a)
     if a.cmd == "archive-scrub":
         from .archive_tools import scrub
-        out(scrub(con, Archive(cfg.archive_dir), (cfg.af_key, cfg.op_key), apply=a.apply))
+        out(scrub(con, Archive(cfg.archive_dir), (cfg.af_key, cfg.op_key), apply=a.apply, expect=a.expect,
+                  superseded_dir=cfg.db_path.parent / "superseded"))
+        return 0
+    if a.cmd == "archive-finalize":
+        from .archive_tools import finalize
+        out(finalize(con, [int(x) for x in a.raw_ids.split(",") if x.strip()], a.confirmed_by))
+        return 0
+    if a.cmd == "repair-damaged" and not a.apply:
+        from .archive_tools import damaged
+        rows = damaged(con)
+        by_ep = {}
+        for d in rows:
+            k = f"{d['provider']} {d['endpoint']}"
+            by_ep.setdefault(k, {"rows": 0, "changed_values": 0, "patterns": {}})
+            by_ep[k]["rows"] += 1
+            by_ep[k]["changed_values"] += d["changed_values"]
+            for pat, n in d["patterns"].items():
+                by_ep[k]["patterns"][pat] = by_ep[k]["patterns"].get(pat, 0) + n
+        out({"dry_run": True, "damaged_rows": len(rows), "per_endpoint": by_ep,
+             "raw_ids": [d["raw_id"] for d in rows],
+             "next": f"if this is what you expect, rerun with --apply --expect {len(rows)}"})
         return 0
     if a.cmd == "export-fixtures":
         from .archive_tools import export_fixtures
@@ -164,6 +194,12 @@ def dispatch(cfg, con, fetcher, slot, a):
         return {"league_dates": AF(cfg, con, fetcher).odds(slot)}
     if a.cmd == "af-results":
         return AF(cfg, con, fetcher).results(slot)
+    if a.cmd == "repair-damaged":
+        from .archive_tools import damaged, refetch
+        rows = damaged(con)
+        if a.expect is None or a.expect != len(rows):
+            raise RuntimeError(f"--expect {a.expect} does not match {len(rows)} damaged rows; nothing fetched")
+        return refetch(con, AF(cfg, con, fetcher), slot, rows)
     if a.cmd == "af-backfill":
         t = now_ms()
         return AF(cfg, con, fetcher).results(slot, since_ms=t - 400 * 86_400_000, until_ms=t - 72 * 3_600_000,
@@ -333,6 +369,12 @@ def report(con, cfg=None) -> dict:
         "mappings_live": q("SELECT count(*) FROM provider_fixture_map WHERE revoked=0")[0][0],
         "unmapped_next_72h": mapping.unmapped_upcoming(cfg, con) if cfg else None,
         "misjoin_rate": q("SELECT * FROM v_misjoin_rate"),
+        "redaction_last_24h": q("SELECT a.provider, a.endpoint, x.rule, count(DISTINCT x.raw_id), sum(x.n)"
+                                " FROM raw_redaction x JOIN raw_response r ON r.raw_id = x.raw_id"
+                                " JOIN api_request a ON a.request_id = r.request_id WHERE r.received_at_ms > ?"
+                                " GROUP BY 1, 2, 3 ORDER BY 1, 2, 3", day),
+        "redaction_alerts_last_24h": q("SELECT count(*) FROM v_redaction_alerts WHERE received_at_ms > ?", day)[0][0],
+        "damaged_unrepaired": len(__import__("collector.archive_tools", fromlist=["damaged"]).damaged(con)),
     }
 
 

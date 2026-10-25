@@ -1,4 +1,4 @@
-# Pinnacle-Close Benchmark Study — Design v0.5
+# Pinnacle-Close Benchmark Study — Design v0.5.1
 
 **Status.** Draft for review. Supersedes v0.4. When accepted, commit it as part of `prereg-0`, then sign and timestamp it (§13).
 **Date.** 2026-10-25.
@@ -28,7 +28,7 @@ OddsPapi steps are held until the v0.5 redeploy (RUNBOOK Part A).
 
 | # | Change | Supersedes |
 |---|---|---|
-| C1 | **Redaction (§0.1).** Response bodies are redacted before hashing, archiving or parsing. This is the one permitted change to a raw body | v0.4 §4: the "keys never stored" claim, which was false for response bodies |
+| C1 | **Redaction (§0.1).** Response bodies are redacted before hashing, archiving or parsing. This is the one permitted change to a raw body. Revised to redact-v2 in v0.5.1, after v1 destroyed key-passes data | v0.4 §4: the "keys never stored" claim, which was false for response bodies |
 | C2 | **Close rule close-v1 (§0.2)**, in one code path, enforced again by schema triggers | §6 `v_close` and the G0.5 per-fixture definitions |
 | C3 | **Look-ahead control (§0.3)** | New gate G0.5d |
 | C4 | **Reverse-direction mapping coverage (§0.4)** | Adds to §5 |
@@ -36,22 +36,28 @@ OddsPapi steps are held until the v0.5 redeploy (RUNBOOK Part A).
 | C6 | **Releases.** Code is root-owned and read-only to the service user; the database is never auto-created; migrations back up first | v0.4 §5 deployment |
 | C7 | **Real-payload tests** for every endpoint | Adds to the testing rule |
 
-### 0.1 Redaction policy (`collector/redact.py`, policy `redact-v1`)
+### 0.1 Redaction policy (`collector/redact.py`, policy `redact-v2`; v0.5.1)
 
-**What is redacted:**
-- Any JSON key named (case-insensitive, exact match) `api_key`, `apikey`, `key`, `token`, `secret`, `password`, `email`, `firstname`, `lastname`, `phone` or `username`, at any depth.
-- `name` inside an `account`, `user`, `owner` or `customer` object.
-- Any string containing a live configured key, anywhere.
-- For non-JSON bodies, live keys in the raw bytes.
-- Live keys echoed in response headers.
+**Incident, 25 Oct.** Policy `redact-v1` applied field-name rules to every endpoint. The bare name `key` matched api-football's key-passes statistic (`passes.key`) in match-detail responses:
+- The v0.5 scrub rewrote 3 such records (raw ids 39–41), blanking 4,612 values, and deleted the originals.
+- Capture-time redaction blanked the same field in every match-detail response until the hotfix.
+- No other field was hit. Odds, fixture lists, statistics and outcomes were unaffected.
+- **Repair:** every damaged response is identified from its own envelope or from `archive_rewrite`, and re-fetched as a new raw row linked in `raw_refetch`. The damaged rows stay as evidence. The original bytes of 39–41 are not recoverable.
 
-**What is kept:**
-- Bodies with nothing to redact keep their exact bytes.
-- Redacted bodies are re-serialised. The envelope records the redacted paths, never the values.
+**Policy v2:**
+- **Personal endpoints** form a fixed list in the `personal_endpoint` table, which only a migration can change: api-football `/status` and OddsPapi `/v4/account`.
+  - On these only, field rules replace credential and personal fields (`api_key`, `key`, `token`, `email`, `firstname`, `lastname`, `phone`, `username` and similar), plus `name` inside an account object.
+- **Data endpoints** (everything else) are never changed by a field rule. The schema refuses to record one firing there.
+  - Only a live configured key found in a string, in the bytes or in a header is replaced (`value:` and `bytes:` rules).
+  - Personal-looking field names (`email`, `api_key`, `password`, `firstname`, `lastname` and similar; never `key`, `token` or `name`) are **counted, not altered** (`detect:` rules).
+- **Alerting:** any rule firing on a data endpoint makes the watchdog fail (healthchecks alert). The daily report shows counts per rule per endpoint (`raw_redaction`).
+- **Scrub:** limited to personal endpoints, and enforced by the schema. It needs `--expect` equal to the dry-run count. It moves originals to `data/superseded/` (outside the archive and the off-box sync), verifies the only differences are the redacted fields, and deletes originals only through `archive-finalize` with a named confirmer.
 
-**Two tests guard the policy:**
-- On real payloads, redaction must change nothing in data endpoints (fixtures, odds, statistics, history), so it can never silently damage data.
-- `archive-scrub` rewrote the two v0.4 `/status` envelopes. The rewrite is recorded in `archive_rewrite`, and `raw_response` is untouched.
+**Tests:**
+- A match-detail payload with `passes.key` must pass through byte-identical.
+- Generic names (`key`, `token`, `name`, `phone`, `username`, `secret`, `password`) on a data endpoint must be untouched.
+- Every committed real data payload must be byte-identical after redaction.
+- Committed real payloads must include a match-detail response with integer key passes.
 
 ### 0.2 Close rule close-v1 (`collector/close.py`; schema `close_rule`, `close_cutoff`, `close_price`)
 
@@ -397,7 +403,7 @@ The old project's real question was "do my forecasts beat the market?" This is t
 | G0.4 | api-football odds `update` granularity resolved |
 | G0.5a–c | §6 (computed at the close-v1 cutoff) |
 | G0.5d | Look-ahead control L1 and L2 (§0.3) |
-| G0.9 | Redaction: `archive-verify` reports zero live secrets, and real data payloads need zero redactions (§0.1) |
+| G0.9 | Redaction: `archive-verify` reports zero live secrets and `damaged_unrepaired = 0`; real data payloads are byte-identical after redaction; no redaction alert on a data endpoint (§0.1) |
 | G0.6 | api-football Pinnacle snapshot coverage ≥ 70% of tracked fixtures per league, with the fixture table as denominator |
 | G0.7 | Mis-join (§5) |
 | G0.8 | api-football 90-minute score agrees with a second source on 20 of 20 cup ties (A3) |

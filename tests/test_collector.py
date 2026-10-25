@@ -464,7 +464,7 @@ def test_restore_test_detects_short_copy(env, tmp_path):   # ABSENT rows in the 
     cfg, con, fake, f = env
     r = backup(cfg.db_path, cfg.db_path.parent / "backups")
     with pytest.raises(RuntimeError, match="fewer rows"):
-        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5}, 5)
+        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5}, 6)
 
 
 def test_cli_offline_commands(env, capsys):

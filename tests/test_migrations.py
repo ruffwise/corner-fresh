@@ -44,12 +44,12 @@ def schema_of(con) -> set:
             con.execute("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
 
 
-def test_migrated_v4_equals_fresh_v5(tmp_path):
+def test_migrated_v4_equals_fresh(tmp_path):
     old = v4_database(tmp_path / "old.db")
     dbc.apply_migrations(old)
     fresh = dbc.connect(tmp_path / "fresh.db", create=True)
     assert schema_of(old) == schema_of(fresh)
-    assert old.execute("PRAGMA user_version").fetchone()[0] == fresh.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert old.execute("PRAGMA user_version").fetchone()[0] == fresh.execute("PRAGMA user_version").fetchone()[0] == 6
     assert old.execute("SELECT * FROM close_rule").fetchall() == fresh.execute("SELECT * FROM close_rule").fetchall()
 
 
@@ -57,7 +57,7 @@ def test_migration_preserves_rows_and_contract(tmp_path):
     old = v4_database(tmp_path / "old.db")
     before = {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in
               ("raw_response", "fixture", "fixture_state_obs", "outcome_obs", "endpoint_allowlist")}
-    assert dbc.apply_migrations(old) == [5]
+    assert dbc.apply_migrations(old) == [5, 6]
     dbc.assert_schema_contract(old)
     after = {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in before}
     assert before == after
@@ -70,6 +70,7 @@ def test_failed_migration_rolls_back(tmp_path, monkeypatch):
     bad = tmp_path / "migs"
     bad.mkdir()
     (bad / "005_bad.sql").write_text("CREATE TABLE half_done (x INTEGER) STRICT;\nTHIS IS NOT SQL;\nPRAGMA user_version = 5;\n")
+    (bad / "006_never.sql").write_text("PRAGMA user_version = 6;\n")
     monkeypatch.setattr(dbc, "MIGRATIONS_DIR", bad)
     with pytest.raises(sqlite3.Error):
         dbc.apply_migrations(old)
@@ -112,13 +113,13 @@ def test_migrate_cli_backs_up_first(tmp_path, capsys, monkeypatch):
                                           'review_dir = "data/review"\n[[leagues]]\nleague_id = 39\nseason = 2026\n')
     assert main(["--config", str(tmp_path / "config.toml"), "migrate"]) == 0
     first = json.loads(capsys.readouterr().out)
-    assert first["migrated"] == [5] and first["backup_restore_test"] == "ok"
+    assert first["migrated"] == [5, 6] and first["backup_restore_test"] == "ok"
     assert "pre-migrate-v4" in first["backup"] and Path(first["backup"]).exists()
     assert main(["--config", str(tmp_path / "config.toml"), "migrate"]) == 0
     assert json.loads(capsys.readouterr().out)["migrated"] == []
     assert main(["--config", str(tmp_path / "config.toml"), "check-config"]) == 0
     info = json.loads(capsys.readouterr().out)
-    assert info["db_exists"] and info["db_user_version"] == 5 and info["fixtures"] == 1
+    assert info["db_exists"] and info["db_user_version"] == 6 and info["fixtures"] == 1
 
 
 def test_check_config_flags_wrong_path(tmp_path, capsys):
@@ -126,3 +127,25 @@ def test_check_config_flags_wrong_path(tmp_path, capsys):
     (tmp_path / "config.toml").write_text('db_path = "nowhere/corners.db"\n[[leagues]]\nleague_id = 39\nseason = 2026\n')
     assert main(["--config", str(tmp_path / "config.toml"), "check-config"]) == 1
     assert not (tmp_path / "nowhere").exists()
+
+
+def test_v5_database_migrates_to_v6(tmp_path):
+    """The VM is at v5 now: the hotfix path is 5 -> 6 only."""
+    old = v4_database(tmp_path / "old.db")
+    real = dbc.MIGRATIONS_DIR
+    five = tmp_path / "only5"
+    five.mkdir()
+    (five / "005_v05.sql").write_text((real / "005_v05.sql").read_text())
+    import contextlib
+    saved = dbc.SCHEMA_VERSION
+    try:
+        dbc.MIGRATIONS_DIR, dbc.SCHEMA_VERSION = five, 5
+        dbc.apply_migrations(old)
+    finally:
+        dbc.MIGRATIONS_DIR, dbc.SCHEMA_VERSION = real, saved
+    assert old.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert dbc.apply_migrations(old) == [6]
+    dbc.assert_schema_contract(old)
+    fresh = dbc.connect(tmp_path / "fresh.db", create=True)
+    assert schema_of(old) == schema_of(fresh)
+    assert old.execute("SELECT count(*) FROM personal_endpoint").fetchone()[0] == 2

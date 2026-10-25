@@ -13,7 +13,7 @@ MIN_SQLITE = (3, 42, 0)  # STRICT tables; unixepoch('subsec') used by freeze tri
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")          # frozen v4 base
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")       # NNN_name.sql, each ends with PRAGMA user_version = NNN
 BASE_VERSION = 4
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def migrations() -> list[tuple[int, Path]]:

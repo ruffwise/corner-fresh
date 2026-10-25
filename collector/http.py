@@ -17,7 +17,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from .redact import POLICY_VERSION, redact
+from .redact import POLICY_VERSION, redact, redact_text
 from .store import Archive, now_ms
 
 SECRET_PARAM_NAMES = {"apikey", "api_key", "key", "token"}
@@ -113,10 +113,13 @@ class Fetcher:
         received = self.clock()
         rheaders = {k: v for k, v in rheaders.items() if k not in DROP_RESPONSE_HEADERS}
         # The one permitted change to a raw body: redact secrets and personal data
-        # BEFORE hashing, archiving or parsing (collector/redact.py).
-        red = redact(body, self.secrets)
+        # BEFORE hashing, archiving or parsing (collector/redact.py). The endpoint
+        # comes from the api_request row, so the scope rule cannot be mis-passed.
+        req_provider, req_endpoint = self.con.execute(
+            "SELECT provider, endpoint FROM api_request WHERE request_id=?", (request_id,)).fetchone()
+        red = redact(body, self.secrets, req_provider, req_endpoint)
         body = red.body
-        rheaders = {k: redact(v.encode(), self.secrets).body.decode("utf-8", "replace") for k, v in rheaders.items()}
+        rheaders = {k: redact_text(v, self.secrets) for k, v in rheaders.items()}
         parsed = None
         try:
             parsed = json.loads(body) if body else None
@@ -137,7 +140,8 @@ class Fetcher:
             "v": 1, "provider": provider, "url": url, "params": params, "page": page, "attempt": attempt,
             "requested_at_ms": requested, "received_at_ms": received, "http_status": status,
             "response_headers": rheaders, "body_sha256": hashlib.sha256(body).hexdigest(),
-            "redaction": {"policy": POLICY_VERSION, "paths": red.paths, "reserialised": red.reserialised},
+            "redaction": {"policy": POLICY_VERSION, "paths": red.paths, "reserialised": red.reserialised,
+                          "rules": dict(red.rules)},
             "body": body.decode("utf-8", errors="replace"),
         }
         _, path = self.archive.write(envelope)
@@ -148,5 +152,7 @@ class Fetcher:
             (request_id, page, attempt, 1 if paged else 0, envelope["body_sha256"], str(path), status,
              requested, received, parse_date_ms(rheaders.get("date")), len(body), api_errors,
              results_count, paging_current, paging_total)).lastrowid
+        for rule, n in sorted(red.rules.items()):
+            self.con.execute("INSERT INTO raw_redaction VALUES (?,?,?,?)", (raw_id, rule, n, POLICY_VERSION))
         usable = self.con.execute("SELECT usable FROM raw_response WHERE raw_id=?", (raw_id,)).fetchone()[0] == 1
         return Result(raw_id, status, parsed, usable, rheaders)
