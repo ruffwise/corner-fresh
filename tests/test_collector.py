@@ -553,3 +553,43 @@ def test_backfill_window_reaches_old_fixtures(env):
     back = run(con, "af_results", lambda s: AF(cfg, con, f).results(s, since_ms=t - 400 * 86_400_000,
                                                                        until_ms=t - 72 * H))
     assert back["outcomes_recorded"] == 1
+
+
+# --- fix 5: tracked fixtures with no mapping -----------------------------------------------------
+
+def upcoming_setup(env, n=6, listed=0, tid_items=None):
+    cfg, con, fake, f = env
+    base = (now_ms() + 24 * H) // 1000 * 1000
+    fx = [af_fixture(2000 + i, base + i * H, home=(10 + i, f"H{i}"), away=(50 + i, f"A{i}")) for i in range(n)]
+    fake.add("/fixtures", {"league": 39, "season": 2026}, (200, af_page(fx)))
+    run(con, "af_fixtures", lambda s: AF(cfg, con, f).fixtures(s))
+    items = [{"fixtureId": f"id{i}", "participant1Id": 100 + i, "participant2Id": 500 + i,
+              "participant1Name": f"H{i}", "participant2Name": f"A{i}",
+              "startTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((base + i * H) / 1000)),
+              "statusId": 0, "tournamentId": 17} for i in range(listed)]
+    return cfg, con, fake, f, items
+
+
+def test_unmapped_share_alerts_and_distinguishes_causes(env):
+    cfg, con, fake, f, items = upcoming_setup(env, n=6, listed=3)
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, items))
+    run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s, force=[17]))
+    um = mapping.unmapped_upcoming(cfg, con)["17"]
+    assert um == {"upcoming": 6, "mapped": 0, "candidate_unmapped": 3, "no_candidate": 3, "unmapped_share": 1.0,
+                  "alert": True, "needs_relisting": True}
+
+
+def test_cli_op_fixtures_relists_when_candidates_absent_and_alerts(env, monkeypatch, capsys):
+    cfg, con, fake, f, items = upcoming_setup(env, n=6, listed=0)
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, []))
+    main = patched_main(monkeypatch, fake)
+    rc = main(["--config", str(cfg.db_path.parent.parent / "config.toml"), "op-fixtures"])
+    res = json.loads(capsys.readouterr().out)
+    assert res["due"] == [17] and rc == 4 and res["alert"] == ["17"]   # listed once (never listed before), still unmapped
+
+
+def test_no_alert_when_nothing_upcoming(env):                       # ABSENT fixtures: no false alarm
+    cfg, con, fake, f = env
+    assert mapping.unmapped_upcoming(cfg, con)["17"]["alert"] is False

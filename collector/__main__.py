@@ -50,6 +50,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("archive-scrub", help="redact secrets/personal data from already-archived bodies")
     p.add_argument("--apply", action="store_true", help="rewrite (default: dry run)")
     sub.add_parser("archive-verify")
+    p = sub.add_parser("export-fixtures", help="copy redacted real payloads into tests/fixtures/real for the test suite")
+    p.add_argument("--out", required=True)
+    p.add_argument("--history", action="append", default=[], metavar="FIXTUREID=ISO_KICKOFF")
     for c in ("init", "migrate", "check-config", "plan", "watchdog", "af-fixtures", "af-odds", "af-results", "af-bootstrap", "op-account",
               "op-history", "report", "map-propose", "map-apply", "map-audit", "map-sample"):
         sub.add_parser(c)
@@ -104,13 +107,19 @@ def main(argv=None) -> int:
         ping(cfg, "watchdog")
         return 0
     if a.cmd == "report":
-        out(report(con))
+        out(report(con, cfg))
         return 0
     if a.cmd.startswith("map-"):
         return mapping_cmd(cfg, con, a)
     if a.cmd == "archive-scrub":
         from .archive_tools import scrub
         out(scrub(con, Archive(cfg.archive_dir), (cfg.af_key, cfg.op_key), apply=a.apply))
+        return 0
+    if a.cmd == "export-fixtures":
+        from .archive_tools import export_fixtures
+        ko = dict(h.split("=", 1) for h in a.history)
+        r = export_fixtures(con, Path(a.out), (cfg.af_key, cfg.op_key), ko)
+        out(r)
         return 0
     if a.cmd == "archive-verify":
         from .archive_tools import verify
@@ -126,6 +135,10 @@ def main(argv=None) -> int:
         with ledger.run_slot(con, job, scheduled_for=None if scheduled else now_ms(), unplanned_ok=not scheduled) as slot:
             result = dispatch(cfg, con, fetcher, slot, a)
         out(result)
+        if isinstance(result, dict) and result.get("alert"):
+            print(f"{a.cmd} ALERT: unmapped share above threshold for tournaments {result['alert']}", file=sys.stderr)
+            ping(cfg, a.cmd, "/fail")
+            return 4
         ping(cfg, a.cmd)
         return 0
     except QuotaRefused as e:
@@ -169,10 +182,25 @@ def dispatch(cfg, con, fetcher, slot, a):
         return {"tournaments_saved_to": str(cfg.review_dir / "day1_oddspapi_tournaments.json"),
                 "markets_raw_id": r["markets_raw_id"]}
     if a.cmd == "op-fixtures":
-        force = [l.oddspapi_tournament_id for l in cfg.leagues if l.oddspapi_tournament_id] if a.force else None
-        return op.fixtures(slot, force=force)
+        tids = sorted({l.oddspapi_tournament_id for l in cfg.leagues if l.oddspapi_tournament_id})
+        if a.force:
+            todo = tids
+        else:
+            t = now_ms()
+            mapping.apply(cfg, con)
+            um = mapping.unmapped_upcoming(cfg, con)
+            relist = [int(k) for k, r in um.items() if r["needs_relisting"]
+                      and (op.last_listing_ms(int(k)) or 0) < t - 48 * 3_600_000]
+            todo = sorted(set(op.fixtures_due(t)) | set(relist))
+        res = op.fixtures(slot, force=todo)
+        res["mapping"] = mapping.apply(cfg, con)
+        res["unmapped_next_72h"] = mapping.unmapped_upcoming(cfg, con)
+        res["alert"] = sorted(k for k, r in res["unmapped_next_72h"].items() if r["alert"])
+        return res
     if a.cmd == "op-history":
-        return op.history(slot)
+        res = {"mapping": mapping.apply(cfg, con)}
+        res.update(op.history(slot))
+        return res
     if a.cmd == "op-backfill":
         ids = op.history_due(now_ms())
         ids = ids[: a.max]
@@ -280,7 +308,7 @@ def mapping_cmd(cfg, con, a) -> int:
     return 0
 
 
-def report(con) -> dict:
+def report(con, cfg=None) -> dict:
     t = now_ms()
     day = t - 86_400_000
     q = lambda sql, *p: con.execute(sql, p).fetchall()  # noqa: E731
@@ -301,6 +329,7 @@ def report(con) -> dict:
         "oddspapi_history_usable": q("SELECT count(DISTINCT a.params_canonical) FROM raw_response r JOIN api_request a"
                                      " ON a.request_id=r.request_id WHERE a.endpoint='/v4/historical-odds' AND r.usable=1")[0][0],
         "mappings_live": q("SELECT count(*) FROM provider_fixture_map WHERE revoked=0")[0][0],
+        "unmapped_next_72h": mapping.unmapped_upcoming(cfg, con) if cfg else None,
         "misjoin_rate": q("SELECT * FROM v_misjoin_rate"),
     }
 

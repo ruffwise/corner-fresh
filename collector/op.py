@@ -123,6 +123,13 @@ class OP:
         return out
 
     # --- fixtures (billable, refreshed rarely) -------------------------------------------------
+    def last_listing_ms(self, tid: int) -> int | None:
+        return self.con.execute(
+            "SELECT max(r.received_at_ms) FROM raw_response r JOIN api_request a ON a.request_id = r.request_id"
+            " WHERE a.provider=? AND a.endpoint='/v4/fixtures' AND r.usable=1"
+            " AND (a.params_canonical = ? OR a.params_canonical LIKE ?)",
+            (PROVIDER, f"tournamentId={tid}", f"%&tournamentId={tid}")).fetchone()[0]
+
     def fixtures_due(self, t: int) -> list[int]:
         due = []
         for lg in self.cfg.leagues:

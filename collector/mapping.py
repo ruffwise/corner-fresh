@@ -178,3 +178,43 @@ def manual_sample(con: sqlite3.Connection, out: Path, n: int = 30, seed: int = 2
         for r in pick:
             w.writerow([*r, "", "", ""])
     return len(pick)
+
+
+# --- reverse direction: tracked api-football fixtures with no mapping (fix 5) ---------------
+
+ALERT_SHARE = 0.10          # pre-registered: alert above 10% unmapped in the next 72 h ...
+ALERT_MIN_FIXTURES = 5      # ... for a tournament with at least 5 upcoming fixtures
+RELIST_SHARE = 0.10         # relist when >10% of upcoming fixtures have NO OddsPapi candidate at all
+
+
+def unmapped_upcoming(cfg: Config, con: sqlite3.Connection, horizon_h: int = 72,
+                      provider: str = "oddspapi", t: int | None = None) -> dict[str, dict]:
+    """Per OddsPapi tournament: api-football fixtures kicking off within horizon_h, and
+    why any of them lacks a mapping. 'candidate_unmapped' means OddsPapi lists a fixture
+    at that time but it did not map (usually a team not yet in the allowlist: relisting
+    won't help, review will). 'no_candidate' means OddsPapi has not listed it: relisting may."""
+    t = now_ms() if t is None else t
+    out: dict[str, dict] = {}
+    for tkey, leagues in _tournament_league(cfg).items():
+        n = mapped = cand_unmapped = no_cand = 0
+        for league_id, season in leagues:
+            rows = con.execute(
+                "SELECT f.fixture_id, l.kickoff_ms FROM fixture f JOIN v_fixture_latest l USING (fixture_id)"
+                " WHERE f.league_id=? AND f.season=? AND l.status_short IN ('NS','TBD') AND l.kickoff_ms BETWEEN ? AND ?",
+                (league_id, season, t, t + horizon_h * 3_600_000)).fetchall()
+            for fid, ko in rows:
+                n += 1
+                if con.execute("SELECT 1 FROM provider_fixture_map WHERE provider=? AND fixture_id=? AND revoked=0",
+                               (provider, fid)).fetchone():
+                    mapped += 1
+                elif con.execute("SELECT 1 FROM provider_fixture_candidate WHERE provider=? AND tournament_key=?"
+                                 " AND abs(start_ms - ?) <= ?", (provider, tkey, ko, TOL_MS)).fetchone():
+                    cand_unmapped += 1
+                else:
+                    no_cand += 1
+        share = (n - mapped) / n if n else 0.0
+        out[tkey] = {"upcoming": n, "mapped": mapped, "candidate_unmapped": cand_unmapped, "no_candidate": no_cand,
+                     "unmapped_share": round(share, 3),
+                     "alert": n >= ALERT_MIN_FIXTURES and share > ALERT_SHARE,
+                     "needs_relisting": n > 0 and no_cand / n > RELIST_SHARE}
+    return out

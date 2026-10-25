@@ -67,3 +67,73 @@ def verify(con: sqlite3.Connection, secrets: tuple[str, ...] = ()) -> dict:
         if secrets and any(s and s in data.decode("utf-8", "replace") for s in secrets):
             problems.append((raw_id, "a live secret is present in the archived file"))
     return {"checked": n, "problems": problems[:50], "problem_count": len(problems)}
+
+
+# --- real-payload test fixtures --------------------------------------------------------------
+
+REQUIRED_ENDPOINTS = [
+    ("api_football", "/status"), ("api_football", "/leagues"), ("api_football", "/fixtures"),
+    ("api_football", "/fixtures/statistics"), ("api_football", "/odds"), ("api_football", "/odds/bookmakers"),
+    ("api_football", "/odds/bets"),
+    ("oddspapi", "/v4/account"), ("oddspapi", "/v4/fixtures"), ("oddspapi", "/v4/historical-odds"),
+]
+
+
+def slug(endpoint: str) -> str:
+    return endpoint.strip("/").replace("/v4/", "").replace("v4/", "").replace("/", "_") or "root"
+
+
+def export_fixtures(con: sqlite3.Connection, out_dir: Path, secrets: tuple[str, ...],
+                    history_kickoffs: dict[str, str], per_endpoint: int = 2) -> dict:
+    """Copy recent usable real responses into test fixtures, re-redacted (defence in depth).
+
+    History payloads need a scheduled kickoff to test the close rule; pass them
+    as {oddspapi_fixture_id: ISO time} or they are taken from the candidates.
+    """
+    import urllib.parse
+    written, missing = [], []
+    for provider, endpoint in REQUIRED_ENDPOINTS:
+        rows = con.execute(
+            "SELECT r.raw_id, a.params_canonical, l.archive_path FROM raw_response r"
+            " JOIN api_request a ON a.request_id = r.request_id JOIN v_archive_location l ON l.raw_id = r.raw_id"
+            " WHERE a.provider=? AND a.endpoint=? AND r.usable=1 ORDER BY r.raw_id DESC LIMIT 50",
+            (provider, endpoint)).fetchall()
+        kept = 0
+        for raw_id, params_c, path in rows:
+            if kept >= per_endpoint:
+                break
+            env = Archive.read(Path(path))
+            red = redact(env["body"].encode("utf-8"), secrets)
+            body = json.loads(red.body)
+            params = dict(urllib.parse.parse_qsl(params_c))
+            if env.get("page", 1) > 1:
+                params["page"] = str(env["page"])
+            meta = {"provider": provider, "endpoint": endpoint, "params": params, "raw_id": raw_id,
+                    "received_at_ms": env["received_at_ms"], "redacted_paths": red.paths}
+            if endpoint == "/v4/historical-odds":
+                fid = params.get("fixtureId")
+                ko = history_kickoffs.get(fid)
+                if ko is None:
+                    row = con.execute("SELECT start_ms FROM provider_fixture_candidate WHERE provider_fixture_id=?"
+                                      " ORDER BY raw_id DESC LIMIT 1", (fid,)).fetchone()
+                    if row:
+                        from datetime import datetime, timezone
+                        ko = datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if ko is None:
+                    continue
+                meta["scheduled_kickoff_utc"] = ko
+                meta["status"] = "FT"
+            d = out_dir / provider
+            d.mkdir(parents=True, exist_ok=True)
+            f = d / f"{slug(endpoint)}_{raw_id}.json.gz"
+            f.write_bytes(gzip.compress(json.dumps({"meta": meta, "body": body}, sort_keys=True).encode(), mtime=0))
+            written.append(str(f))
+            kept += 1
+        if kept == 0:
+            missing.append(f"{provider} {endpoint}")
+    leaked = [w for w in written if any(s and s.encode() in gzip.decompress(Path(w).read_bytes()) for s in secrets)]
+    if leaked:
+        for w in leaked:
+            Path(w).unlink()
+        raise RuntimeError(f"export aborted: a live secret survived redaction in {leaked}")
+    return {"written": written, "missing_endpoints": missing}
