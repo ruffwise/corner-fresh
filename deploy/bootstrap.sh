@@ -3,7 +3,9 @@
 #   sudo bash deploy/bootstrap.sh
 set -euo pipefail
 apt-get update
-apt-get install -y python3 sqlite3 chrony rclone git curl
+# rclone is installed from rclone.org, not Ubuntu (24.04 ships 1.60, which lacks the
+# azureblob options deploy/backup.sh relies on): see RUNBOOK U5.
+apt-get install -y python3 sqlite3 chrony git curl gnupg
 systemctl enable --now chrony
 timedatectl set-timezone UTC
 
@@ -24,7 +26,7 @@ HC_OP_FIXTURES=
 HC_OP_HISTORY=
 HC_WATCHDOG=
 HC_BACKUP=
-# Optional rclone remote for off-box backup, e.g. b2:my-bucket/corners
+# Off-box copy target (remote:container) from /etc/corners/rclone.conf, e.g. corners-offbox:corners
 RCLONE_REMOTE=
 SECRETS
 fi

@@ -198,3 +198,116 @@ def test_real_history_no_post_cutoff_record_enters_close(path):
         assert close.close_series(poisoned, cut.cutoff_ms).price == c.price, key
         worst = min(worst, cut.cutoff_ms - (c.record_ms or cut.cutoff_ms - 1))
     assert worst > 0
+
+
+# --- v0.5.2 pre-registered additions ----------------------------------------------------------------
+
+def test_v1b_bridges_a_suspension_that_began_within_5_minutes():
+    recs = [Record(CUT - 20 * MIN, 2.0, True), Record(CUT - 4 * MIN, 2.1, True), Record(CUT - 1 * MIN, 2.1, False)]
+    v1 = close.close_series(recs, CUT)
+    v1b = close.close_series(recs, CUT, bridge_ms=close.BRIDGE_MS)
+    assert v1.price is None and v1.reason == "suspended_at_cutoff"          # v1 itself is unchanged
+    assert v1b.price == 2.1 and v1b.bridged and v1b.record_ms == CUT - 4 * MIN
+
+
+def test_v1b_does_not_bridge_an_older_suspension():
+    recs = [Record(CUT - 20 * MIN, 2.0, True), Record(CUT - 6 * MIN, 2.0, False)]
+    assert close.close_series(recs, CUT, bridge_ms=close.BRIDGE_MS).reason == "suspended_at_cutoff"
+
+
+def test_v1b_never_uses_a_post_cutoff_record():
+    recs = [Record(CUT - 3 * MIN, 2.0, True), Record(CUT - 1 * MIN, 2.0, False), Record(CUT + 1, 9.0, True)]
+    c = close.close_series(recs, CUT, bridge_ms=close.BRIDGE_MS)
+    assert c.price == 2.0 and c.record_ms < CUT
+
+
+def test_v1b_equals_v1_when_in_force_record_is_active():
+    rnd = random.Random(11)
+    for _ in range(300):
+        recs = [Record(CUT - rnd.randint(1, 300) * MIN, round(rnd.uniform(1.1, 9), 2), True)
+                for _ in range(rnd.randint(1, 20))]
+        a, b = close.close_series(recs, CUT), close.close_series(recs, CUT, bridge_ms=close.BRIDGE_MS)
+        assert (a.price, a.record_ms, a.last_change_ms, a.reason) == (b.price, b.record_ms, b.last_change_ms, b.reason)
+
+
+def test_g05a_needs_two_start_sources():
+    assert not close.cutoff(KO, "FT").counts_toward_g05a
+    assert close.cutoff(KO, "FT", af_actual_start_ms=KO + MIN).counts_toward_g05a
+    assert not close.cutoff(KO, "FT", af_actual_start_ms=KO + 40 * MIN).counts_toward_g05a   # excluded fixture
+
+
+CATALOG = [{"marketId": 101, "marketType": "1x2", "period": "fulltime", "handicap": 0.0, "marketName": "FT Result"},
+           {"marketId": 1010, "marketType": "totals", "period": "fulltime", "handicap": 2.5},
+           {"marketId": 1012, "marketType": "totals", "period": "fulltime", "handicap": 3.5},
+           {"marketId": 1008, "marketType": "totals", "period": "fulltime", "handicap": 1.5}]
+
+
+def iso(ms):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_main_line_is_most_balanced_at_cutoff_minus_60_and_ignores_later_moves():
+    t60, t5 = iso(CUT - 70 * MIN), iso(CUT - 5 * MIN)
+    body = payload({("1010", "1010"): [(t60, 1.95, True), (t5, 1.50, True)],       # balanced at -60, moves late
+                    ("1010", "1011"): [(t60, 1.95, True), (t5, 2.70, True)],
+                    ("1012", "1012"): [(t60, 3.10, True), (t5, 1.98, True)],       # balanced only late
+                    ("1012", "1013"): [(t60, 1.38, True), (t5, 1.92, True)],
+                    ("1008", "1008"): [(t60, 1.30, True)], ("1008", "1009"): [(t60, 3.60, True)]})
+    cat = close.market_catalog(CATALOG)
+    assert close.main_lines(close.series_from_history(body), CUT, cat) == {"totals:fulltime": "1010"}
+
+
+def test_report_by_market_and_family_shows_suspended_main_line():
+    t60, t3, t1 = iso(CUT - 70 * MIN), iso(CUT - 3 * MIN), iso(CUT - 1 * MIN)
+    body = payload({("101", "101"): [(t60, 2.0, True)], ("101", "102"): [(t60, 3.4, True)],
+                    ("101", "103"): [(t60, 3.9, True)],
+                    ("1010", "1010"): [(t60, 1.95, True), (t3, 1.95, True), (t1, 1.95, False)],   # main, suspended
+                    ("1010", "1011"): [(t60, 1.95, True)],
+                    ("1012", "1012"): [(t60, 3.1, True), (iso(CUT - 30 * MIN), 3.1, False)],       # alt line pulled
+                    ("1012", "1013"): [(t60, 1.38, True), (iso(CUT - 30 * MIN), 1.38, False)]})
+    rep = close.fixture_close_report(body, close.cutoff(KO, "FT", af_actual_start_ms=KO),
+                                     catalog=close.market_catalog(CATALOG))
+    assert rep["start_sources_present"] == 2 and rep["counts_toward_g05a"]
+    assert rep["by_market"]["1012"]["suspended_at_cutoff"] == 2 and rep["by_market"]["1012"]["with_close_v1b"] == 0
+    assert rep["by_market"]["1010"] == {"series": 2, "with_close_v1": 1, "suspended_at_cutoff": 1,
+                                        "with_close_v1b": 2, "type": "totals", "period": "fulltime", "handicap": 2.5}
+    tot = rep["by_family"]["totals:fulltime"]
+    assert tot["main_market"] == "1010" and not tot["main_line_usable_v1"] and tot["main_line_usable_v1b"]
+    assert rep["by_family"]["1x2:fulltime"]["main_line_usable_v1"]
+    d = {(x["market"], x["outcome"]): x for x in rep["suspended_at_cutoff_detail"]}
+    assert d[("1010", "1010")]["last_active_before_cutoff_min"] == 3.0 and d[("1010", "1010")]["bridged_by_v1b"]
+    assert d[("1012", "1012")]["suspended_for_min"] == 30.0 and not d[("1012", "1012")]["bridged_by_v1b"]
+
+
+def control(n=500, flags=()):
+    rows = [(f"f{i}", 0.5, 0.5, 0.5, i % 2) for i in range(n)]
+    for i in flags:
+        rows[i] = (f"f{i}", 0.5, 0.5, 0.62, 0)       # a 12pp jump against the outcome: flags, does not fail L1
+    return close.lookahead_control(rows, boot=500)
+
+
+def test_l2_flags_go_to_review_not_failure():
+    c = control(flags=(3,))
+    assert c.passed and len(c.jumps_over_10pp) == 1                 # L1 passes; the flag is not a failure
+    assert close.lookahead_gate(c, {})["status"] == "pending_review"
+    assert close.lookahead_gate(c, {"f3": "late_news"})["status"] == "pass"
+    assert close.lookahead_gate(c, {"f3": "unexplained"})["status"] == "pass"
+
+
+def test_l2_contamination_fails_the_gate():
+    g = close.lookahead_gate(control(flags=(3,)), {"f3": "in_play_contamination"})
+    assert g["status"] == "fail" and g["fails"] == ["L2_in_play_contamination"]
+
+
+def test_l2_flag_rate_above_two_percent_fails_whatever_the_causes():
+    c = control(n=500, flags=tuple(range(11)))                     # 11/500 = 2.2%
+    g = close.lookahead_gate(c, {f"f{i}": "late_news" for i in range(11)})
+    assert g["status"] == "fail" and "L2_flag_rate" in g["fails"]
+    c = control(n=500, flags=tuple(range(10)))                     # 10/500 = 2.0%: at the cap, not above
+    assert close.lookahead_gate(c, {f"f{i}": "late_news" for i in range(10)})["status"] == "pass"
+
+
+def test_l2_unknown_cause_refused():
+    with pytest.raises(ValueError, match="unknown causes"):
+        close.lookahead_gate(control(flags=(3,)), {"f3": "looked fine"})

@@ -5,6 +5,14 @@ db_path = "/opt/corners/data/corners.db"
 archive_dir = "/opt/corners/data/archive"
 review_dir = "/opt/corners/data/review"
 
+# Scheduled jobs that run. This list is the single source of truth:
+#   - the planner creates slots only for these, and the watchdog checks only these;
+#   - release.sh enables exactly these timers and disables the others;
+#   - a timer that fires for a job not listed here does nothing and fails the watchdog.
+# Add op_account and op_fixtures at RUNBOOK A11 step 6 (commit, then release.sh).
+# op_history is free and does nothing until mappings exist.
+active_jobs = ["af_fixtures", "af_odds", "af_results", "op_history"]
+
 # Leagues to track. api-football ids; season = starting year (2026 = 2026/27).
 # oddspapi_tournament_id: fill in from data/review/day1_oddspapi_tournaments.json
 # (RUNBOOK R8), commit, and deploy. Until then OddsPapi skips that league.

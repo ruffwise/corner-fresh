@@ -1,9 +1,258 @@
-# Runbook v0.5.1
+# Runbook v0.5.2
 
-**Part A** redeploys v0.5 over the running v0.4 install. The af-odds timer is never stopped, and no data is lost.
+**Part U** upgrades the running v0.5.1 install to v0.5.2 and sets up the off-box copy. Do it next.
+**Part A-H** (the v0.5.1 hotfix) and Part A up to A9 are done. After Part U, continue with A7, then A10–A11.
 **Part B** is a fresh install, for reference.
 
 Run all commands on the VM unless a step says otherwise. Replace `OWNER` with your GitHub user or organisation.
+
+---
+
+## Part U — Upgrade to v0.5.2 (do this next)
+
+**What it fixes.**
+- **Alert noise.** Slots are planned, and checked by the watchdog, only for the jobs listed in `active_jobs` in `config/production.toml`. `release.sh` enables exactly those timers. A timer that fires for any other job does nothing and fails the watchdog. Every watchdog failure now names what failed in the healthchecks event.
+- **Backups on the VM only.** Part U5–U6 set up an off-box copy to Azure Blob Storage. The daily report gains `backup` and `storage` sections.
+
+v0.5.2 has **no schema migration**, and no timer is stopped. `active_jobs` starts as `af_fixtures`, `af_odds`, `af_results`, `op_history`, which keeps the `op_history` timer you enabled on 26 Oct.
+
+### U1. Bring the commits into your clone and push (as `azureuser`)
+
+The bundle holds two commits on top of your `main` (d401bc1): the docs-only count correction (78167d2) and v0.5.2.
+
+1. Copy the bundle to the VM (from your PC):
+   ```bash
+   scp corner-fresh-v052.bundle azureuser@<vm>:~/
+   ```
+2. On the VM:
+   ```bash
+   cd ~/corner-fresh
+   git fetch ~/corner-fresh-v052.bundle main
+   git merge --ff-only FETCH_HEAD
+   git log --oneline | head -3        # top line: "v0.5.2: ..."
+   git push
+   ```
+
+### U2. Deploy
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh main
+```
+
+**Expected:**
+- the preflight JSON shows `"active_jobs": ["af_fixtures", "af_odds", "af_results", "op_history"]`, followed by six `job:` lines, with `op_account` and `op_fixtures` `inactive`;
+- migrate prints `"migrated": []` and `"note": "already current"`;
+- no `enabled` or `disabled` lines, because your timers already match;
+- `plan` prints `pending_removed_for_inactive_jobs` with about 2 slots each for `op_account` and `op_fixtures`. These are the slots that would have become tonight's false misses;
+- `watchdog` prints `"summary": "ok"`.
+
+If `watchdog` prints anything else, send me its output.
+
+### U3. Check the timers
+
+```bash
+systemctl list-timers 'corners*' --no-pager
+```
+
+**Expected:** `af-fixtures`, `af-odds`, `af-results`, `op-history`, `plan`, `watchdog`, `report` and `backup`. No `op-account` or `op-fixtures`.
+
+From now on, to start or stop a scheduled job, edit `active_jobs`, commit, push, and run `release.sh`. Don't run `systemctl enable` or `disable` by hand. The watchdog reports a timer that fires for a job outside the list.
+
+### U4. Measure the archive growth (one minute)
+
+```bash
+sudo /opt/corners/app/deploy/run.sh report | python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps({k: r[k] for k in ("storage", "backup", "active_jobs")}, indent=2))'
+sudo du -sh /opt/corners/data/archive /opt/corners/data/corners.db* /opt/corners/data/backups
+df -h /opt/corners/data
+```
+
+Send me the output. `archive_mb_last_24h` × 30 is the monthly growth from api-football alone. The OddsPapi history adds about 0.15–0.3 GB a month once A11 runs, plus about 1 GB once for the backfill (DESIGN §0.6). `days_until_disk_full_at_this_rate` tells you whether the VM disk needs attention before the off-box copy matters.
+
+### U5. Off-box copy to Azure Blob Storage
+
+**Why Azure Blob, in a separate resource group, through the VM's managed identity:**
+- No key or secret is stored on the VM: rclone gets a token from the VM's identity.
+- The VM's role can read, list and create blobs, but **not delete** them. Blob versioning keeps anything overwritten. So a compromised or misbehaving VM can't destroy the copy.
+- A separate resource group with a delete lock survives losing the VM or deleting its resource group.
+- The cost is pennies (DESIGN §0.6).
+
+The one exposure it shares with the VM is your Azure subscription itself (billing or account loss). If you want a provider-independent copy as well, Backblaze B2 is the alternative: about $6.95 per TB-month, first 10 GB free. Say so and I'll add it as a second remote.
+
+#### U5a. Create the storage (Cloud Shell, or your PC with `az login` to your **personal** subscription)
+
+1. Confirm the subscription:
+   ```bash
+   az account show --query "{name:name, id:id}" -o table
+   ```
+2. Set the names. The storage account name must be 3–24 lowercase letters or digits, unique across Azure:
+   ```bash
+   VM_RG=<your VM's resource group>
+   VM=analytics
+   LOC=$(az vm show -g "$VM_RG" -n "$VM" --query location -o tsv)
+   BK_RG=corners-backup-rg
+   SA=cornersbk$RANDOM
+   SUB=$(az account show --query id -o tsv)
+   echo "$LOC $SA"                     # write SA down; you need it in U5c
+   ```
+3. Create the resource group, the account and the container:
+   ```bash
+   az group create -n "$BK_RG" -l "$LOC"
+   az storage account create -g "$BK_RG" -n "$SA" -l "$LOC" --sku Standard_LRS --kind StorageV2 \
+     --access-tier Hot --min-tls-version TLS1_2 --https-only true \
+     --allow-blob-public-access false --allow-shared-key-access false
+   az storage account blob-service-properties update -g "$BK_RG" --account-name "$SA" \
+     --enable-versioning true \
+     --enable-delete-retention true --delete-retention-days 30 \
+     --enable-container-delete-retention true --container-delete-retention-days 30
+   az storage container-rm create -g "$BK_RG" --storage-account "$SA" -n corners
+   ```
+4. Expire **database backups** after 90 days. The raw archive is kept indefinitely. Azure runs this rule itself; the VM never deletes anything:
+   ```bash
+   cat > lifecycle.json <<'JSON'
+   {"rules": [{"enabled": true, "name": "expire-db-backups-90d", "type": "Lifecycle",
+     "definition": {"filters": {"blobTypes": ["blockBlob"], "prefixMatch": ["corners/backups/"]},
+                    "actions": {"baseBlob": {"delete": {"daysAfterModificationGreaterThan": 90}},
+                                "version": {"delete": {"daysAfterCreationGreaterThan": 90}}}}}]}
+   JSON
+   az storage account management-policy create -g "$BK_RG" --account-name "$SA" --policy @lifecycle.json
+   ```
+5. Lock the resource group against deletion:
+   ```bash
+   az lock create -n corners-backup-no-delete --lock-type CanNotDelete -g "$BK_RG"
+   ```
+
+#### U5b. Give the VM's identity write-but-not-delete access
+
+1. Turn on the VM's system-assigned identity and keep its principal id:
+   ```bash
+   PRINCIPAL=$(az vm identity assign -g "$VM_RG" -n "$VM" --query systemAssignedIdentity -o tsv)
+   echo "$PRINCIPAL"
+   ```
+2. Create the custom role. It is **Storage Blob Data Contributor minus delete**:
+   ```bash
+   SCOPE=/subscriptions/$SUB/resourceGroups/$BK_RG/providers/Microsoft.Storage/storageAccounts/$SA
+   cat > corners-role.json <<JSON
+   {"Name": "corners blob writer (no delete)", "IsCustom": true,
+    "Description": "Read, list and create blobs in the corners off-box container. No delete.",
+    "Actions": [], "NotActions": [],
+    "DataActions": ["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read",
+                    "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+                    "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action"],
+    "NotDataActions": [],
+    "AssignableScopes": ["$SCOPE"]}
+   JSON
+   az role definition create --role-definition @corners-role.json
+   ```
+3. **Check the action names against the built-in role** before relying on them. Every entry in the custom role must appear in the built-in role's list, and the built-in list should also show `.../blobs/delete`, which we leave out:
+   ```bash
+   az role definition list --name "Storage Blob Data Contributor" --query "[0].permissions[0].dataActions" -o tsv
+   ```
+4. Assign the role on the container only:
+   ```bash
+   az role assignment create --assignee-object-id "$PRINCIPAL" --assignee-principal-type ServicePrincipal \
+     --role "corners blob writer (no delete)" --scope "$SCOPE/blobServices/default/containers/corners"
+   ```
+   Role assignments can take a few minutes to take effect.
+
+#### U5c. Install rclone and configure it (on the VM)
+
+Ubuntu 24.04 ships rclone 1.60.1, which lacks the `env_auth` and `no_check_container` options used here. Install the current release from rclone.org, and verify its signature first.
+
+1. Check the architecture; the commands assume `amd64`:
+   ```bash
+   dpkg --print-architecture
+   ```
+2. Download and verify v1.75.2:
+   ```bash
+   cd /tmp && V=v1.75.2
+   curl -fsSLO https://downloads.rclone.org/$V/rclone-$V-linux-amd64.deb
+   curl -fsSLO https://downloads.rclone.org/$V/SHA256SUMS
+   gpg --keyserver keyserver.ubuntu.com --receive-keys FBF737ECE9F8AB18604BD2AC93935E02FF3B54FA
+   gpg --verify SHA256SUMS                                        # must say: Good signature from "Nick Craig-Wood
+   gpg --decrypt SHA256SUMS 2>/dev/null | sha256sum -c --ignore-missing   # must say: rclone-v1.75.2-linux-amd64.deb: OK
+   ```
+   If either check fails, stop and send me the output.
+3. Replace the Ubuntu package:
+   ```bash
+   sudo apt-get remove -y rclone
+   sudo apt-get install -y ./rclone-$V-linux-amd64.deb
+   rclone version | head -1            # rclone v1.75.2
+   ```
+4. Write the rclone config. Replace `<SA>` with the storage account name from U5a. It holds no secret:
+   ```bash
+   sudo tee /etc/corners/rclone.conf >/dev/null <<'CONF'
+   [corners-offbox]
+   type = azureblob
+   account = <SA>
+   env_auth = true
+   no_check_container = true
+   CONF
+   sudo chown root:corners /etc/corners/rclone.conf && sudo chmod 640 /etc/corners/rclone.conf
+   ```
+5. Define a helper for this session, which runs rclone as the `corners` user:
+   ```bash
+   rc() { sudo -u corners env RCLONE_CONFIG=/etc/corners/rclone.conf XDG_CACHE_HOME=/opt/corners/data/.cache rclone "$@"; }
+   ```
+6. **Prove the permissions.** Create must work and delete must fail:
+   ```bash
+   rc lsf corners-offbox:corners && echo "list OK"
+   echo "corners off-box self-test $(date -u +%FT%TZ)" | rc rcat corners-offbox:corners/selftest/hello.txt && echo "create OK"
+   rc deletefile corners-offbox:corners/selftest/hello.txt; echo "delete exit code $? (must be non-zero; expect 403 AuthorizationPermissionMismatch)"
+   ```
+   If `list` or `create` fails with 403, wait five minutes for the role assignment and retry. **If the delete succeeds, stop:** the role is wrong. Send me the output of `az role assignment list --assignee "$PRINCIPAL" -o table`.
+7. Point the backup at the remote:
+   ```bash
+   sudo sed -i 's|^RCLONE_REMOTE=.*|RCLONE_REMOTE=corners-offbox:corners|' /etc/corners/secrets.env
+   sudo grep '^RCLONE_REMOTE=' /etc/corners/secrets.env
+   ```
+
+### U6. First copy and a restore drill
+
+1. Run the backup service once now. The first run uploads the whole archive, which can take a while:
+   ```bash
+   sudo systemctl start corners-backup.service
+   sudo journalctl -u corners-backup --since -30min --no-pager | tail -15
+   ```
+   **Expected:** the local backup line with `'restore_test': 'ok'`, then `{"offbox": "ok", "local_archive_files": N, "remote_archive_files": M, ...}` with M ≥ N.
+2. Restore drill: download the newest backup from the remote and check it on its own:
+   ```bash
+   L=$(rc lsf corners-offbox:corners/backups | sort | tail -1); echo "$L"
+   sudo -u corners mkdir -p /opt/corners/data/restore-drill
+   rc copy "corners-offbox:corners/backups/$L" /opt/corners/data/restore-drill/
+   sudo -u corners bash -c "cd /opt/corners/app && python3 -m collector.backup --check-file /opt/corners/data/restore-drill/$L"
+   sudo -u corners rm -rf /opt/corners/data/restore-drill
+   ```
+   **Expected:** `"integrity_check": "ok"`, `"foreign_key_failures": 0`, `"user_version": 6`, and row counts close to the report's.
+3. The report and the watchdog now show the off-box state:
+   ```bash
+   sudo /opt/corners/app/deploy/run.sh report | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["backup"], indent=2))'
+   sudo /opt/corners/app/deploy/run.sh watchdog
+   ```
+   **Expected:** `backup.problems` is `[]`, and `offbox.last_sync.result` is `ok`.
+
+From now on, the watchdog fails if no local backup is newer than 26 hours, or if the off-box copy failed or is older than 26 hours. G0.3 (DESIGN §11) needs 7 consecutive `ok` nights.
+
+### U7. healthchecks for the backup
+
+Do this as part of A7. Create `HC_BACKUP` with **Cron** `20 2 * * *`, time zone **UTC**, grace **2 h**, and put its URL in `/etc/corners/secrets.env`. A failed run posts its reason, which shows in the check's event log. For now, create checks only for the active jobs. `HC_OP_ACCOUNT` and `HC_OP_FIXTURES` belong with A11 step 6; created earlier, they would alert for pings that can't come.
+
+### U8. Which markets were suspended in the A9 fixture (free, no API call)
+
+```bash
+sudo /opt/corners/app/deploy/run.sh close-report id1000001772221292 --kickoff 2026-10-10T11:30:00Z
+```
+
+Send me `by_market` and `suspended_at_cutoff_detail`. They show, for each market id, the series with a v1 close, the suspended ones, the ones v1b would bridge, and for each suspended series how long it had been suspended. Market 101 is full-time 1X2.
+
+After A10's `op-catalog`, rerun with `--markets-raw-id <markets_raw_id from op-catalog>`. That adds `by_family` with each family's main line and whether it was usable under v1 and v1b.
+
+### U9. If you need to undo v0.5.2
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh d401bc1 --rollback
+```
+
+The schema is unchanged, so this is code only. v0.5.1 code plans every job again, so the `op_*` false misses return until you redeploy v0.5.2. The off-box copy keeps working, because the v0.5.1 `backup.sh` also copies when `RCLONE_REMOTE` is set. It doesn't verify the copy or record status.
 
 ---
 
@@ -246,7 +495,8 @@ journalctl -u corners@af-odds --since -2h | tail -5
    sudo /opt/corners/app/deploy/run.sh archive-scrub --apply --expect <rewrite_candidates>
    sudo /opt/corners/app/deploy/run.sh archive-verify
    ```
-   Originals are **moved** to `/opt/corners/data/superseded/`, not deleted. That folder is outside the archive, so it is never synced off-box. `archive-verify` lists them under `superseded_originals_pending`.
+   Originals are **moved** to `/opt/corners/data/superseded/`, not deleted. That folder is outside the archive, so it is never copied off-box. `archive-verify` lists them under `superseded_originals_pending`.
+   **If the original was already copied off-box** (any record older than the last nightly copy), the remote still holds it, and the VM can't delete it by design. Delete that blob yourself with your own Azure login, then purge it from soft delete and versions: `az storage blob delete --account-name <SA> -c corners -n archive/<xx>/<sha>.json.gz --auth-mode login --delete-snapshots include`. Then remove the version in the portal under **Versions**.
 3. **Check one rewritten record**, then delete the originals:
    ```bash
    sudo /opt/corners/app/deploy/run.sh archive-finalize --raw-ids <ids> --confirmed-by "<your name>"
@@ -265,7 +515,7 @@ If you blanked `RCLONE_REMOTE` in A0, restore it now.
 
 ### A7. healthchecks.io for every job (mandatory)
 
-healthchecks.io is the only alarm if the VM itself goes down. Create one check per job, using **Schedule = Cron** and **Time zone = UTC**:
+healthchecks.io is the only alarm if the VM itself goes down. Create one check per **active** job (`active_jobs` in `config/production.toml`), using **Schedule = Cron** and **Time zone = UTC**. Add `HC_OP_ACCOUNT` and `HC_OP_FIXTURES` only at A11 step 6, when those jobs become active:
 
 | Variable | Cron | Grace |
 |---|---|---|
@@ -395,10 +645,13 @@ Send me the output. These fields matter:
    sudo /opt/corners/app/deploy/run.sh op-backfill --max 600
    sudo /opt/corners/app/deploy/run.sh af-backfill --max 1500
    ```
-6. **Enable the OddsPapi timers:**
+6. **Activate the OddsPapi jobs.** In your clone, edit `config/production.toml` to read
+   `active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]`. Then commit, push and deploy:
    ```bash
-   sudo systemctl enable --now corners-op-account.timer corners-op-fixtures.timer corners-op-history.timer
+   cd ~/corner-fresh && git commit -am "activate op_account and op_fixtures" && git push
+   sudo bash /opt/corners/repo/deploy/release.sh main      # prints: enabled corners-op-account.timer, ...op-fixtures.timer
    ```
+   Then create `HC_OP_ACCOUNT` (`50 0 * * *`, grace 1 h) and `HC_OP_FIXTURES` (`55 0 * * *`, grace 1 h).
 
 From now on, `op-fixtures` runs `map-apply` itself. It alerts (exit 4, healthchecks fail) when more than 10% of the next 72 hours' fixtures in a tournament are unmapped. It relists, within the quota guard, when OddsPapi hasn't listed them.
 
@@ -480,3 +733,7 @@ Until this step is done, CI fails one test, `test_every_endpoint_has_a_real_payl
 | `release.sh` stuck "waiting for quiet window" | A job is running, or it is outside :21–:28 | Wait. It never switches while a job runs |
 | `ABORT: db_path differs` | The release config points somewhere else | Fix `config/production.toml` in git. The script never creates a new database |
 | `archive-verify` problems | A file is missing, has a bad hash, or contains a live secret | Send me the output before doing anything else |
+| Watchdog: `<job>: timer_enabled_but_not_in_active_jobs` | A timer was enabled by hand for a job outside `active_jobs`; the run did nothing | Add the job to `active_jobs` and deploy, or `sudo systemctl disable --now corners-<job>.timer` |
+| Watchdog: `backup: no_backup_in_26h` | The nightly backup didn't run or failed | `sudo journalctl -u corners-backup --since -2d` |
+| Watchdog: `offbox: last_sync_failed` or `no_sync_in_26h` | The off-box copy failed or didn't run; `report` → `backup.offbox.last_sync.detail` says which step | Check `rc lsf corners-offbox:corners` (U5c step 5); token or role problems show as 403 |
+| `release.sh`: `ABORT: af_odds is not in active_jobs` | The config would stop odds capture | Fix `active_jobs` in git |

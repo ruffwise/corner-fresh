@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+# Jobs driven by a systemd timer and the slot ledger. Which of them run is decided
+# by `active_jobs` in the committed config: the planner plans slots only for those,
+# the watchdog checks only those, and release.sh enables exactly their timers.
+SCHEDULED_JOBS = ("af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history")
+
+
 @dataclass(frozen=True)
 class League:
     league_id: int
@@ -35,6 +41,7 @@ class Config:
     op_history_delay_h: float = 3.0           # pull history this long after scheduled kickoff
     op_history_max_per_run: int = 60          # ~5 minutes at the 5 s cooldown
     healthchecks: dict[str, str] = field(default_factory=dict)
+    active_jobs: tuple[str, ...] = ()
 
 
 def load(path: str | Path) -> Config:
@@ -50,6 +57,13 @@ def load(path: str | Path) -> Config:
     ids = [(l.league_id, l.season) for l in leagues]
     if len(ids) != len(set(ids)):
         raise ValueError("config: duplicate (league_id, season)")
+    if "active_jobs" not in raw:
+        raise ValueError("config: active_jobs is missing; list the scheduled jobs whose timers should run "
+                         f"(any of {', '.join(SCHEDULED_JOBS)})")
+    active = tuple(raw["active_jobs"])
+    unknown = sorted(set(active) - set(SCHEDULED_JOBS))
+    if unknown or len(active) != len(set(active)):
+        raise ValueError(f"config: active_jobs has unknown or repeated entries {unknown or active}")
     af = raw.get("api_football", {})
     op = raw.get("oddspapi", {})
     hc = {k[3:].lower(): v for k, v in os.environ.items() if k.startswith("HC_") and v}
@@ -73,4 +87,5 @@ def load(path: str | Path) -> Config:
         op_history_delay_h=float(op.get("history_delay_h", 3.0)),
         op_history_max_per_run=int(op.get("history_max_per_run", 60)),
         healthchecks=hc,
+        active_jobs=tuple(j for j in SCHEDULED_JOBS if j in active),
     )

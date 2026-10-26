@@ -43,6 +43,12 @@ sudo -u corners bash -c "set -a; . /etc/corners/secrets.env; set +a; cd '$REL' &
   | tee /tmp/corners-preflight.json
 grep -q '"db_path": "/opt/corners/data/corners.db"' /tmp/corners-preflight.json || { echo "ABORT: db_path differs"; exit 1; }
 grep -q '"db_exists": true' /tmp/corners-preflight.json || { echo "ABORT: database not found at configured path"; exit 1; }
+# Which scheduled jobs the new config activates (empty for code older than v0.5.2).
+JOBS=$(sudo -u corners bash -c "set -a; . /etc/corners/secrets.env; set +a; cd '$REL' && python3 -m collector --config '$CFG' scheduled-jobs" 2>/dev/null || true)
+if [ -n "$JOBS" ]; then
+  echo "$JOBS" | sed 's/^/   job: /'
+  echo "$JOBS" | grep -Eq '^af_odds active$' || { echo "ABORT: af_odds is not in active_jobs; refusing to stop odds capture"; exit 1; }
+fi
 
 # 3. Wait for the quiet window.
 wait_quiet() {
@@ -78,8 +84,28 @@ for f in "$REL"/deploy/corners@.service "$REL"/deploy/corners-*.timer "$REL"/dep
 done
 [ "$changed" = 1 ] && systemctl daemon-reload
 
+# 6b. Scheduled-job timers follow active_jobs in the committed config, so the planner,
+#     the watchdog and systemd can never disagree. Infrastructure timers (plan,
+#     watchdog, report, backup) are always on.
+if [ -n "$JOBS" ]; then
+while read -r job state; do
+  t=corners-${job//_/-}.timer
+  if [ "$state" = active ]; then
+    systemctl is-enabled --quiet "$t" && systemctl is-active --quiet "$t" || { systemctl enable --now "$t"; echo "   enabled $t"; }
+  else
+    if systemctl is-enabled --quiet "$t" || systemctl is-active --quiet "$t"; then systemctl disable --now "$t"; echo "   disabled $t (not in active_jobs)"; fi
+  fi
+done <<< "$JOBS"
+else
+  echo "   this release has no active_jobs support (older code): scheduled-job timers left as they are"
+fi
+for t in corners-plan.timer corners-watchdog.timer corners-report.timer corners-backup.timer; do
+  systemctl is-enabled --quiet "$t" && systemctl is-active --quiet "$t" || { systemctl enable --now "$t"; echo "   enabled $t"; }
+done
+
 # 7. Post-checks with the new code.
 run() { sudo -u corners bash -c "set -a; . /etc/corners/secrets.env; set +a; cd '$BASE/app' && python3 -m collector --config '$BASE/app/config/production.toml' $*"; }
+run plan                      # plan for the active jobs now; removes pending slots of inactive ones
 run watchdog || true
 run archive-verify | tail -5
 echo "== live: $(readlink -f $BASE/app)"

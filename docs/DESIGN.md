@@ -1,13 +1,14 @@
-# Pinnacle-Close Benchmark Study — Design v0.5.1
+# Pinnacle-Close Benchmark Study — Design v0.5.2
 
 **Status.** Draft for review. Supersedes v0.4. When accepted, commit it as part of `prereg-0`, then sign and timestamp it (§13).
-**Date.** 2026-10-25.
+**Date.** 2026-10-26.
 
 **Companion files**
 
 - `db/schema.sql` (v4 base), `db/migrations/005_v05.sql` (to v5) and `db/connect.py`
-- `collector/` and `deploy/`, plus `RUNBOOK.md` (v0.5)
-- `tests/`: 185 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
+- `db/migrations/006_v051.sql` (to v6; v0.5.2 adds no migration)
+- `collector/` and `deploy/`, plus `RUNBOOK.md` (v0.5.2)
+- `tests/`: 229 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
 - `analysis/power.py` and its output `analysis/power_output.md`
 
 Every number in this document comes from `analysis/power.py` unless a source is cited.
@@ -16,13 +17,26 @@ Every number in this document comes from `analysis/power.py` unless a source is 
 
 ---
 
-## 0. Status, and what changed in v0.5
+## 0. Status, and what changed in v0.5 and v0.5.2
 
-**Collection status.** api-football capture has been running since 25 Oct on your Azure VM:
-- 5,628 fixtures tracked across 16 league-seasons;
-- `af-bootstrap` passed (one bookmaker named `Pinnacle`, id 4).
+**Collection status (26 Oct).** api-football capture has been running since 25 Oct on your Azure VM, now at schema v6 (hotfix v0.5.1):
+- 5,628 fixtures tracked across 16 league-seasons; 76 outcomes;
+- last 24 h: `af_odds` 24 of 24 slots, `af_results` 25, `af_fixtures` 4; 1,104 odds responses; 0 clock flags;
+- `af-bootstrap` passed (one bookmaker named `Pinnacle`, id 4);
+- nightly backup with restore test passing, **on the VM only** until RUNBOOK U5 is done.
 
-OddsPapi steps are held until the v0.5 redeploy (RUNBOOK Part A).
+OddsPapi steps (A10–A11) follow the v0.5.2 deploy.
+
+**v0.5.2 changes** (no schema change):
+
+| # | Change | Supersedes |
+|---|---|---|
+| C8 | **Scheduled jobs follow `active_jobs`** in the committed config: the planner plans, the watchdog checks and `release.sh` enables only those. A timer firing for any other job does nothing and fails the watchdog. The watchdog's failure ping names each problem | v0.5 planner, which planned every job and so alerted hourly on jobs that were never enabled |
+| C9 | **Off-box copy** to Azure Blob Storage through the VM's managed identity, with a no-delete role, blob versioning and soft delete; nightly copy verified by a one-way check; backup and off-box status, storage growth and free disk in the daily report | v0.4 §5 "rclone if set" |
+| C10 | **Look-ahead L2 flags go to inspection**, with a pre-registered flag-rate cap and cause list (§0.3) | §0.3 L2 as an automatic failure |
+| C11 | **Suspended at the cutoff:** close-v1b registered now as a sensitivity rule, with a switching rule that uses suspension counts only (§0.2) | — |
+| C12 | **≥ 2 start sources** for a fixture to count toward G0.5a, with a floor on how many fixtures may lack them (§0.2) | §6 G0.5a denominator |
+| C13 | **Main-line rule** for G0.5 and the look-ahead selection (§0.2) | §6, which named the main line without defining it |
 
 **v0.5 changes.** Each supersedes the section named.
 
@@ -75,6 +89,19 @@ OddsPapi steps are held until the v0.5 redeploy (RUNBOOK Part A).
    - age of the last **price change**. Repeated same-price records make the first measure flattering.
 5. **G0.5a/b** are computed at the cutoff, not at kickoff. Book silence is measured from the cutoff to the last pre-cutoff record of any market.
 
+**Pre-registered on 26 Oct, before any gate data** (`collector/close.py`, tests in `tests/test_close.py`):
+
+6. **Main line** (totals and spreads families; `close.main_lines`). The line whose two sides, de-vigged multiplicatively, are closest to 50/50 at **cutoff − 60 min**, with both sides active then. Ties go to the smaller |handicap|, then the lower market id. 1X2 and BTTS have one line. The choice is made before the look-ahead windows (cutoff − 20 and − 10 min), so late moves cannot pick the line.
+7. **Start sources.** A fixture counts toward G0.5a only when **at least 2** start sources are present (api-football scheduled kickoff plus api-football first-half start and/or OddsPapi `trueStartTime`). With one source, late-kickoff protection is untested. Such fixtures still get a close-v1 close; they are reported, not counted.
+   - **Floor:** G0.5a fails if fewer than **80%** of finished, mapped fixtures have ≥ 2 sources, so the gate cannot pass on a small self-selected subset.
+   - The G0.5 report shows the number of sources per fixture, and which ones.
+8. **Suspended at the cutoff: close-v1b.** 22 of 428 series in the A9 fixture were `suspended_at_cutoff`. The A9 output did not record which markets; `close-report` (v0.5.2) now gives the per-market and, with the `/v4/markets` catalog, per-family breakdown from the archive. My expectation is that most are alternative lines withdrawn as the main line moved, which don't affect G0.5a (main lines only). If instead main 1X2 or main totals lines are routinely suspended at kickoff − 2 min, G0.5a would fail by construction. Fixing that after seeing it would be a data-driven rule change, so the alternative and the rule for adopting it are fixed now:
+   - **close-v1b** (sensitivity): when the record in force at the cutoff is suspended, use the last **active** record if it lies within **5 minutes** before the cutoff. Otherwise there is no close. It never uses a record at or after the cutoff (tested by mutation), and equals v1 whenever the in-force record is active.
+   - Both are computed for every fixture and reported side by side per market family in the G0.5 report, with the suspended series listed (how long suspended, how far back the last active record was).
+   - **Switching rule, applied once, at the first G0.5 evaluation:** a family moves to v1b only if, on the G0.5 sample, its G0.5a usable share is below 80% under v1, at or above 80% under v1b, and main-line suspension is the reason for the shortfall (v1 would reach 80% if suspended main lines counted). Then a new close-rule version (close-v2 = v1b for those families) is registered and applied to **every** fixture of the family, exploration and confirmation alike. Otherwise v1 stays.
+   - The decision uses suspension counts only: no outcomes, forecasts or prices against outcomes.
+   - **Why not v1b as primary:** a suspended price is one the book had withdrawn, so it is a weaker benchmark, and a weaker benchmark makes "beating the close" easier. For any family that switches, the share of bridged closes is reported, and a confirmatory result must also hold with the bridged fixtures excluded.
+
 **Enforcement in the schema:**
 - `close_cutoff` refuses a cutoff that isn't min(sources) − buffer.
 - It refuses a non-excluded cutoff when the sources disagree, or when the match didn't finish.
@@ -88,7 +115,7 @@ OddsPapi steps are held until the v0.5 redeploy (RUNBOOK Part A).
 
 ### 0.3 Look-ahead control (G0.5d)
 
-**Set-up.** Use one pre-registered selection per fixture: the side of the main goals O/U line. Take its implied probability at cutoff − 20 min, cutoff − 10 min and the close. Sign each move by the outcome: move × (2y − 1).
+**Set-up.** Use one pre-registered selection per fixture: the **Over** side of the main full-time goals line (main line as defined in §0.2 item 6). Take its implied probability at cutoff − 20 min, cutoff − 10 min and the close. Sign each move by the outcome: move × (2y − 1).
 
 **I have not adopted the literal test** ("final-window move = 0 within its CI"), because it is wrong as a null:
 - Late pre-match money is informative, so the signed move is **positive** even with no leak. That is why closing-line value works at all.
@@ -96,11 +123,22 @@ OddsPapi steps are held until the v0.5 redeploy (RUNBOOK Part A).
 
 **The pre-registered gate instead:**
 - **L1:** the upper 95% CI of mean(final-window signed move − previous-window signed move) is below 0.5pp. A leak adds a large final-window move that the previous window lacks.
-- **L2:** no fixture moves more than 10pp between cutoff − 10 min and the close. A goal-sized jump before kickoff is a leak or a data error, and is inspected by hand.
+- **L2 (revised 26 Oct, accepted by you with this change):** a fixture whose selection moves more than 10pp between cutoff − 10 min and the close is **flagged for inspection**. Flags do not stop the project or exclude the fixture by themselves.
 
 The literal final-window mean and CI are still reported alongside.
 
-**Status.** The control runs once the OddsPapi outcome allowlist exists (M6). Its function and tests are in place now.
+**L2 inspection (pre-registered; `close.lookahead_gate`):**
+- Each flagged fixture gets its record timeline (all series, ± 30 min around the cutoff) and its start sources reviewed by hand. The cause is recorded as one of:
+  - `in_play_contamination`: a record used for the close came from after the real start, for example because a start source was wrong;
+  - `late_news`: a dated public report before the cutoff explains the move (team news, a late withdrawal);
+  - `data_error`: the vendor feed is wrong (an isolated record that reverts, a price inconsistent with the other sides);
+  - `unexplained`.
+- **G0.5d fails** if L1 fails, or **any** flag is `in_play_contamination`, or flags exceed **2%** of the fixtures in the control (whatever their causes).
+- G0.5d is pending while any flag lacks a cause. `late_news`, `data_error` and `unexplained` flags are listed in the report but don't fail the gate below the 2% cap.
+- **Flagged fixtures are never dropped.** If contamination is found, it is fixed by a new close-rule version applied to all fixtures, and the control is re-run.
+- **Why 2%:** a 10pp move in the last 10 pre-match minutes on a main goals line needs major late news; I expect it in well under 0.5% of top-league fixtures. 2% leaves room for that while catching a systematic leak, which would flag far more. This is a judgment, fixed before any data.
+
+**Status.** The control runs once the OddsPapi outcome allowlist exists (M6). Its function, the gate and their tests are in place now.
 
 ### 0.4 Reverse-direction mapping coverage
 
@@ -114,6 +152,26 @@ The literal final-window mean and CI are still reported alongside.
 
 **Cost of the relist rule.** If OddsPapi genuinely lacks some fixtures, it spends up to 1 call per tournament every 2 days, until the monthly budget refuses further calls. That refusal is itself alerted. The budget protects the quota; the alert makes the cost visible.
 
+### 0.5 Scheduled jobs and alerting (C8)
+
+- `active_jobs` in `config/production.toml` is the one list. Today: `af_fixtures`, `af_odds`, `af_results`, `op_history`. `op_account` and `op_fixtures` join at RUNBOOK A11.
+- `plan` creates slots only for active jobs and deletes **pending** slots of inactive ones. Pending slots have no requests, so nothing observed is lost; claimed, complete, failed and missed slots are never touched.
+- `watchdog` marks misses only for active jobs. It also reports a timer that fired for an inactive job (`CORNERS_TRIGGER=timer` is set only by the systemd unit; a by-hand `run.sh` run of an inactive job gets its own unplanned slot and is fine).
+- Every watchdog failure is POSTed to healthchecks with a one-line summary per check (job, what, when), so a real miss reads differently from noise. Job failure pings carry the error text, scrubbed of live keys.
+- `release.sh` enables exactly the active jobs' timers, disables the rest, and refuses a config without `af_odds`.
+
+### 0.6 Off-box copy (C9)
+
+**Where:** Azure Blob Storage in your personal subscription, in a **separate resource group** with a delete lock, so deleting or losing the VM (or its resource group) can't take the copy with it.
+
+**Access:** the VM's system-assigned managed identity, so no storage key or secret is on the VM. A custom role allows read, list and create, but **not delete**, scoped to the one container; shared-key access is disabled on the account. Blob versioning keeps any overwritten version, and soft delete (30 days) covers your own mistakes. A compromised VM can add data but can't destroy what is already there.
+
+**What is copied, nightly after the local backup:** the backup files (new names each night) and the whole raw archive, with `rclone copy --immutable` (never `sync`; nothing is deleted remotely). Then `rclone check --one-way` must find every local archive file on the remote, or the run fails. Backups older than 90 days are expired remotely by a lifecycle rule run by Azure, not the VM; the archive is kept.
+
+**Monitoring:** `last_backup.json` and `last_offbox.json` feed the daily report (`backup`, `storage`) and the watchdog (no backup in 26 h, off-box failed or stale). `HC_BACKUP` gets the result with a reason on failure.
+
+**Growth and cost.** api-football's archive rate isn't measured yet; the daily report now shows `archive_mb_last_24h` and the 30-day projection (RUNBOOK U4 measures it today). The OddsPapi part can be bounded from the one measured payload: the Arsenal v Leeds history was about 7 MB of JSON (59k records). Assuming gzip reduces it 8–15 times, that is roughly 0.5–0.9 MB per fixture: about 0.15–0.3 GB a month forward (about 325 fixtures a month), plus about 0.8–1.5 GB once for the backfill since January. Cost is not a deciding factor at any plausible rate. At West Europe Hot LRS list prices ($0.0196 per GB-month; writes $0.054 per 10,000), about 1,200 new files a day cost about $0.19 a month to write. Growth of 1, 3 or 10 GB a month costs about $1.5, $4.6 or $15 in storage over the first year, plus about $2.3 for writes.
+
 ---
 
 ## 1. What counts as success
@@ -126,7 +184,7 @@ The literal final-window mean and CI are still reported alongside.
 
 **Why both tests.** Encompassing detects information even when the forecast is badly scaled. The log-loss test asks whether the forecast, as issued, is better. A forecast that only passes encompassing has information but is not yet a better probability.
 
-**Timing.** The forecast is frozen at a pre-registered time before kickoff (default: our api-football capture 60–120 minutes before kickoff). The close is the price in force at kickoff. This is deliberately hard: the forecast competes with a price set later, with more information, including team news.
+**Timing.** The forecast is frozen at a pre-registered time before kickoff (default: our api-football capture 60–120 minutes before kickoff). The close is the price in force at the close-v1 cutoff, 2 minutes before the earliest start source (§0.2). This is deliberately hard: the forecast competes with a price set later, with more information, including team news.
 
 **Not success metrics:** hit rate, accuracy, AUC, calibration alone, EV at capture, and ROI at SportyBet (untested; §7).
 
@@ -142,7 +200,7 @@ The literal final-window mean and CI are still reported alongside.
 | F4 | History is available since January 2026. Records carry `createdAt`, `price`, `limit` and `active`. The call returns at most 3 bookmakers, has a 5 s cooldown, and finished fixtures return an ETag | Documented | OddsPapi "GET historical-odds" |
 | F5 | `/v4/fixtures` with `tournamentId` makes `from`/`to` optional. Its 2 s cooldown applies, and each fixture carries `fixtureId`, participant ids and names, `startTime`, `statusId` and external ids | Documented | OddsPapi "GET fixtures" |
 | F6 | OddsPapi has a v5 historical endpoint with a `changedAt` field per record | Documented | OddsPapi v5 docs. Not used yet, because you specified v4. Worth one look on day 1 if v4's `createdAt` turns out to be a poll time |
-| U1 | Does api-football list Pinnacle? | **Unknown** | Day 1: `af-bootstrap` asserts exactly one bookmaker named `Pinnacle` (requirement 2) |
+| F7 | api-football lists exactly one bookmaker named `Pinnacle`, id 4 (was U1) | **Resolved 25 Oct** | `af-bootstrap` PASS on your VM |
 | U2 | Is `sportId=10` football in OddsPapi? | Unknown (10 is only the docs' example) | Day 1: `op-catalog` output |
 | U3 | Does a `tournamentId` listing reach back to January (the previous season)? | Unknown | Day 1: month histogram (RUNBOOK step 9.5) |
 | U4 | Does `createdAt` mean the price changed, or that the scraper saw it? | Unknown | G0.5c cross-check against our own api-football Pinnacle snapshots |
@@ -258,11 +316,12 @@ A test asserts that no `sb_` table exists, and that a bookmaker cannot be given 
 
 **Per fixture and market family, the close is usable when all three hold:**
 - (a) book silence at the **cutoff** ≤ 15 minutes, which shows the vendor was observing at the end;
-- (b) every side of the main line has a close under close-v1 (an active record in force at the cutoff);
-- (c) the mapping is live and unaudited-or-agreeing.
+- (b) every side of the main line (§0.2 item 6) has a close under close-v1 (an active record in force at the cutoff);
+- (c) the mapping is live and unaudited-or-agreeing;
+- (d) the fixture has at least 2 start sources (§0.2 item 7). Fixtures with fewer are reported and not counted, subject to the 80% floor.
 
 **The source passes G0.5 when all three hold:**
-- (a) **G0.5a:** ≥ 80% of mapped fixtures are usable, per family;
+- (a) **G0.5a:** ≥ 80% of mapped fixtures with ≥ 2 start sources are usable, per family, under close-v1 (or close-v2 for a family switched by the rule in §0.2 item 8); and ≥ 80% of finished mapped fixtures have ≥ 2 start sources;
 - (b) **G0.5b:** median book silence ≤ 15 minutes;
 - (c) **G0.5c:** on ≥ 200 forward comparison points, the OddsPapi in-force price equals our api-football Pinnacle snapshot to within one tick (|Δ| ≤ 0.01 below odds 2.00, ≤ 0.02 above) at ≥ 95% of points.
 
@@ -270,7 +329,9 @@ G0.5c is the test of `createdAt`'s meaning (U4), and it doubles as the `price_ag
 
 **If G0.5 fails, stop:** there is no usable closing benchmark from these sources, and the objective cannot be tested.
 
-**G0.5d (look-ahead control):** §0.3. **If it fails, stop:** the close may contain in-play information.
+**G0.5d (look-ahead control):** §0.3. **If it fails, stop:** the close may contain in-play information. Contamination is fixed by a new close-rule version for all fixtures, then G0.5 is re-run; flagged fixtures are never dropped.
+
+**The G0.5 report shows, per market family:** usable share under v1 and v1b; the main line's suspended sides; the suspended-series list; start sources per fixture; book silence; and the L2 flags with their recorded causes.
 
 **The Arsenal v Leeds check** (RUNBOOK A9) prints the close-v1 report: the cutoff and its basis, records excluded in the buffer and after the cutoff, closes by reason, and staleness by last record and by last change. It is one fixture: an illustration, not the gate.
 
@@ -400,11 +461,12 @@ The old project's real question was "do my forecasts beat the market?" This is t
 | Gate | Pass condition |
 |---|---|
 | G0.0 | `af-bootstrap` finds exactly one bookmaker named `Pinnacle`. If not, Pinnacle snapshots, price agreement and capture-time features are unavailable, and G0.5c cannot run. Report, then decide |
-| G0.1 Ledger | ≥ 99.0% of slots complete over 14 days, no 2 consecutive misses, every miss explained |
+| G0.1 Ledger | ≥ 99.0% of slots of **active** jobs complete over 14 days, no 2 consecutive misses, every miss explained |
+| G0.3 Off-box | Nightly off-box copy `ok` for 7 consecutive nights, and one restore drill from the remote copy passes `--check-file` (RUNBOOK U5–U6) |
 | G0.2 Clock | `clock_ok = 0` on ≤ 1% of 200 responses; chrony p99 offset < 50 ms |
 | G0.4 | api-football odds `update` granularity resolved |
 | G0.5a–c | §6 (computed at the close-v1 cutoff) |
-| G0.5d | Look-ahead control L1 and L2 (§0.3) |
+| G0.5d | Look-ahead control: L1, and L2 inspection with the 2% flag cap (§0.3) |
 | G0.9 | Redaction: `archive-verify` reports zero live secrets and `damaged_unrepaired = 0`; real data payloads are byte-identical after redaction; no redaction alert on a data endpoint (§0.1) |
 | G0.6 | api-football Pinnacle snapshot coverage ≥ 70% of tracked fixtures per league, with the fixture table as denominator |
 | G0.7 | Mis-join (§5) |
@@ -421,7 +483,7 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 
 | # | Prediction | Falsified if |
 |---|---|---|
-| P13 | api-football lists exactly one bookmaker named `Pinnacle`. Weak prior | It doesn't |
+| P13 | api-football lists exactly one bookmaker named `Pinnacle`. Weak prior | It doesn't. **Resolved 25 Oct: held** (id 4) |
 | P14 | OddsPapi Pinnacle history passes G0.5a and G0.5b for EPL fixtures | Either gate fails for EPL |
 | P15 | `createdAt` is a change-capture time, and G0.5c passes | G0.5c < 95% |
 | P16 | A `tournamentId` listing without `from` does **not** reach back to January | Months before August appear |
@@ -457,7 +519,9 @@ Unchanged:
 |---|---|
 | Schema v4, connection contract, schema tests | **Done**; deployed 25 Oct |
 | Raw collector, quota guard, slot ledger and watchdog, backup with restore test, systemd units | **Done**; api-football part running since 25 Oct |
-| v0.5: redaction and archive scrub; close-v1 and its schema; look-ahead control; null-name catalog; reverse-unmapped alert; schema v5 migration; read-only releases; real-payload tests | **Done.** Waiting on the redeploy (RUNBOOK Part A) |
+| v0.5: redaction and archive scrub; close-v1 and its schema; look-ahead control; null-name catalog; reverse-unmapped alert; schema v5 migration; read-only releases; real-payload tests | **Done**; deployed 25 Oct |
+| v0.5.1 hotfix: endpoint-scoped redaction, damage repair (schema v6) | **Done**; deployed and repaired 25 Oct |
+| v0.5.2: active jobs, named watchdog failures, timer drift guard; off-box copy and backup status; close-v1b, main-line rule, start-source rule, L2 inspection gate; `close-report` | **Done.** Deploy with RUNBOOK Part U |
 | Mapping tooling (propose, load from git, apply, kickoff audit, manual sample) | **Done** |
 | M6: parsers into `quote` and `price_history` with allowlists from the day-1 dumps; `price_agreement` audit | Next. Needs the day-1 dumps |
 | M7: G0.5 report, coverage ledger job, de-vig oracle test (R13), training-cutoff guard (R14) | After M6 |
@@ -472,9 +536,14 @@ Unchanged:
 - League breadth: 8 competitions.
 - The ceiling (§7) and the stop rules (§10), including the hard stop after one season unless you decide in writing to continue.
 
-**Open:**
-1. Accept the look-ahead gate in §0.3 (L1/L2) in place of the literal "final move = 0" test, or tell me why the literal test should stand.
-2. Do the redeploy (RUNBOOK Part A).
+**Decided on 26 Oct:**
+- Look-ahead gate L1/L2 accepted, with L2 flags going to inspection, never dropped (§0.3).
+- G0.5a needs ≥ 2 start sources per counted fixture (§0.2 item 7).
+
+**Open (fixed in this draft; confirm or change before `prereg-0`):**
+1. The L2 flag-rate cap of 2% and the four causes (§0.3).
+2. close-v1b and its switching rule (§0.2 item 8), and the 80% floor on fixtures with ≥ 2 start sources (item 7).
+3. The main-line rule at cutoff − 60 min, and Over as the look-ahead selection (§0.2 item 6, §0.3).
 
 ---
 
@@ -492,3 +561,11 @@ Unchanged:
 - [Azure CLI: az vm auto-shutdown](https://learn.microsoft.com/en-us/cli/azure/vm?view=azure-cli-latest)
 - [Azure free account FAQ](https://azure.microsoft.com/en-us/free/free-account-faq/)
 - [penaltyblog implied-probability methods](https://penaltyblog.readthedocs.io/en/latest/implied/implied.html)
+- [OddsPapi API concepts: market and outcome ids](https://docs.oddspapi.io/api-reference/concepts.md)
+- [Azure retail prices API (Hot and Cool LRS, West Europe)](https://prices.azure.com/api/retail/prices)
+- [Azure Blob time-based retention and immutability](https://learn.microsoft.com/en-us/azure/storage/blobs/immutable-time-based-retention-policy-overview)
+- [Authorize blob access with Microsoft Entra ID](https://learn.microsoft.com/en-us/azure/storage/blobs/authorize-access-azure-active-directory)
+- [rclone Azure Blob backend](https://rclone.org/azureblob/), [downloads](https://rclone.org/downloads/), [release signing](https://rclone.org/release_signing/)
+- [Ubuntu noble rclone package (1.60.1)](https://packages.ubuntu.com/noble/rclone)
+- [Backblaze B2 pricing](https://www.backblaze.com/cloud-storage/pricing)
+- [Healthchecks pinging API (POST body stored with the ping, up to 100 kB)](https://healthchecks.io/docs/http_api/)

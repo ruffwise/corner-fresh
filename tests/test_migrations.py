@@ -110,7 +110,7 @@ def test_migrate_cli_backs_up_first(tmp_path, capsys, monkeypatch):
     (tmp_path / "data").mkdir()
     v4_database(tmp_path / "data" / "corners.db").close()
     (tmp_path / "config.toml").write_text('db_path = "data/corners.db"\narchive_dir = "data/archive"\n'
-                                          'review_dir = "data/review"\n[[leagues]]\nleague_id = 39\nseason = 2026\n')
+                                          'review_dir = "data/review"\nactive_jobs = ["af_odds"]\n[[leagues]]\nleague_id = 39\nseason = 2026\n')
     assert main(["--config", str(tmp_path / "config.toml"), "migrate"]) == 0
     first = json.loads(capsys.readouterr().out)
     assert first["migrated"] == [5, 6] and first["backup_restore_test"] == "ok"
@@ -124,7 +124,7 @@ def test_migrate_cli_backs_up_first(tmp_path, capsys, monkeypatch):
 
 def test_check_config_flags_wrong_path(tmp_path, capsys):
     from collector.__main__ import main
-    (tmp_path / "config.toml").write_text('db_path = "nowhere/corners.db"\n[[leagues]]\nleague_id = 39\nseason = 2026\n')
+    (tmp_path / "config.toml").write_text('db_path = "nowhere/corners.db"\nactive_jobs = ["af_odds"]\n[[leagues]]\nleague_id = 39\nseason = 2026\n')
     assert main(["--config", str(tmp_path / "config.toml"), "check-config"]) == 1
     assert not (tmp_path / "nowhere").exists()
 

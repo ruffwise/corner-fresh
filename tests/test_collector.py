@@ -74,6 +74,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("OP_KEY", OP_KEY)
     (tmp_path / "config.toml").write_text(
         'db_path = "data/c.db"\narchive_dir = "data/archive"\nreview_dir = "data/review"\n'
+        'active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]\n'
         '[[leagues]]\nleague_id = 39\nseason = 2026\noddspapi_tournament_id = 17\n'
         '[oddspapi]\nmonthly_billable_budget = 5\nquota_reserve = 50\n')
     cfg = load(tmp_path / "config.toml")
@@ -408,16 +409,16 @@ def test_kickoff_audit_records_disagreement(env):
 def test_plan_and_watchdog(env):
     cfg, con, fake, f = env
     t = now_ms()
-    assert ledger.plan(con, horizon_h=48, t=t) > 0
-    assert ledger.watchdog(con, t=t) == []
+    assert ledger.plan(con, cfg.active_jobs, horizon_h=48, t=t)["slots_planned"] > 0
+    assert ledger.watchdog(con, cfg.active_jobs, t=t) == []
     later = t + 3 * H
-    missed = ledger.watchdog(con, t=later)
+    missed = ledger.watchdog(con, cfg.active_jobs, t=later)
     assert any(j == "af_odds" for j, _ in missed)
 
 
 def test_watchdog_reports_absent_plan(env):              # ABSENT: planner never ran
     cfg, con, fake, f = env
-    missed = ledger.watchdog(con)
+    missed = ledger.watchdog(con, cfg.active_jobs)
     assert {m[0] for m in missed} == {f"{j}:no_future_slot_planned" for j in ledger.CADENCE}
 
 
@@ -616,3 +617,205 @@ def test_load_teams_reads_committed_bytes_not_working_copy(env, tmp_path):
         mapping.load_teams_from_git(con, repo, sha[:12], "review/t.csv")
     with pytest.raises(subprocess.CalledProcessError):
         mapping.load_teams_from_git(con, repo, "f" * 40, "review/t.csv")
+
+
+# --- v0.5.2: active jobs, watchdog naming, timer drift ----------------------------------------------
+
+ONLY_AF = ("af_fixtures", "af_odds", "af_results")
+
+
+def test_inactive_job_gets_no_slots_and_no_watchdog_failure(env):
+    cfg, con, fake, f = env
+    t = now_ms()
+    r = ledger.plan(con, ONLY_AF, horizon_h=48, t=t)
+    assert r["slots_planned"] > 0 and r["active_jobs"] == list(ONLY_AF)
+    jobs = {j for (j,) in con.execute("SELECT DISTINCT job FROM capture_slot")}
+    assert jobs == set(ONLY_AF)
+    for later in (t + 3 * H, t + 30 * H):                       # no op_* misses, ever
+        assert all(not m[0].startswith("op_") for m in ledger.watchdog(con, ONLY_AF, t=later))
+    assert ledger.watchdog(con, ONLY_AF, t=t) == []
+
+
+def test_plan_removes_pending_slots_of_jobs_made_inactive(env):    # the 25-26 Oct VM state
+    cfg, con, fake, f = env
+    t = now_ms()
+    ledger.plan(con, ledger.CADENCE, horizon_h=48, t=t)          # old planner: every job
+    with ledger.run_slot(con, "op_history", scheduled_for=ledger.nominal("op_history", t)):
+        pass                                                     # one op_history slot actually ran
+    r = ledger.plan(con, ONLY_AF, horizon_h=48, t=t)
+    assert set(r["pending_removed_for_inactive_jobs"]) == {"op_account", "op_fixtures", "op_history"}
+    left = con.execute("SELECT job, status FROM capture_slot WHERE job LIKE 'op_%'").fetchall()
+    assert left == [("op_history", "complete")]                  # history of what ran is kept
+    assert ledger.watchdog(con, ONLY_AF, t=t + 30 * H) and \
+        all(not m[0].startswith("op_") for m in ledger.watchdog(con, ONLY_AF, t=t + 31 * H))
+
+
+def test_scheduled_jobs_equal_ledger_cadence():
+    from collector.config import SCHEDULED_JOBS
+    assert set(SCHEDULED_JOBS) == set(ledger.CADENCE)
+
+
+def test_config_requires_valid_active_jobs(tmp_path):
+    base = 'db_path = "c.db"\n[[leagues]]\nleague_id = 39\nseason = 2026\n'
+    (tmp_path / "a.toml").write_text(base)
+    with pytest.raises(ValueError, match="active_jobs is missing"):
+        load(tmp_path / "a.toml")
+    (tmp_path / "b.toml").write_text('active_jobs = ["af_odds", "op_bogus"]\n' + base)
+    with pytest.raises(ValueError, match="unknown or repeated"):
+        load(tmp_path / "b.toml")
+
+
+def test_production_config_active_jobs():
+    cfg = load(ROOT / "config" / "production.toml")
+    assert "af_odds" in cfg.active_jobs
+    assert set(cfg.active_jobs) <= set(ledger.CADENCE)
+
+
+def cli(env):
+    return ["--config", str(env[0].db_path.parent.parent / "config.toml")]
+
+
+def set_active(env, jobs):
+    p = env[0].db_path.parent.parent / "config.toml"
+    import re
+    p.write_text(re.sub(r"active_jobs = \[.*\]", "active_jobs = [" + ", ".join(f'"{j}"' for j in jobs) + "]",
+                        p.read_text()))
+
+
+def test_cli_plan_and_watchdog_ignore_inactive_jobs(env, capsys):
+    from collector.__main__ import main
+    set_active(env, ONLY_AF)
+    assert main(cli(env) + ["plan"]) == 0
+    assert main(cli(env) + ["watchdog"]) == 0
+    out_ = capsys.readouterr().out
+    assert '"summary": "ok"' in out_ and '"op_' not in out_.split('"active_jobs"')[1].split("]")[0]
+
+
+def test_watchdog_failure_names_the_missed_jobs_in_the_ping(env, monkeypatch, capsys):
+    import collector.__main__ as m
+    cfg, con, fake, f = env
+    monkeypatch.setenv("HC_WATCHDOG", "https://hc.example/ping/abc")
+    sent = []
+    monkeypatch.setattr(m.urllib.request, "urlopen",
+                        lambda req, timeout=10: sent.append((req.full_url, req.data)) or type(
+                            "R", (), {"read": lambda self: b""})())
+    t = now_ms() - 3 * H
+    ledger.plan(con, cfg.active_jobs, horizon_h=48, t=t)        # planned 3 h ago, nothing ran since
+    assert m.main(cli(env) + ["watchdog"]) == 1
+    url, body = sent[-1]
+    assert url.endswith("/fail") and b"af_odds: 3 (missed @" in body
+    assert "watchdog FAIL: " in capsys.readouterr().err
+
+
+def test_timer_run_of_inactive_job_does_nothing_and_alerts(env, monkeypatch, capsys):
+    from collector.__main__ import main
+    cfg, con, fake, f = env
+    set_active(env, ONLY_AF)
+    monkeypatch.setenv("CORNERS_TRIGGER", "timer")
+    assert main(cli(env) + ["op-account"]) == 5
+    assert fake.calls == []                                       # no API call at all
+    assert "not in active_jobs" in capsys.readouterr().err
+    assert con.execute("SELECT status FROM capture_slot WHERE job='op_account'").fetchone() == ("failed",)
+    monkeypatch.delenv("CORNERS_TRIGGER")
+    main(cli(env) + ["plan"])
+    rc = main(cli(env) + ["watchdog"])
+    assert rc == 1 and "timer_enabled_but_not_in_active_jobs" in capsys.readouterr().out
+
+
+def test_by_hand_run_of_inactive_job_uses_an_unplanned_slot(env, monkeypatch, capsys):
+    main = patched_main(monkeypatch, env[2])
+    cfg, con, fake, f = env
+    set_active(env, ONLY_AF)
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 3}))
+    assert main(cli(env) + ["op-account"]) == 0
+    row = con.execute("SELECT status, note, scheduled_for_ms FROM capture_slot WHERE job='op_account'").fetchone()
+    assert row[0] == "complete" and row[1] != ledger.INACTIVE_TIMER_NOTE
+    assert row[2] != ledger.nominal("op_account", row[2])            # its own unplanned slot, not the plan's
+
+
+def test_failure_ping_never_carries_a_key(env, monkeypatch, capsys):
+    import collector.__main__ as m
+    cfg, con, fake, f = env
+    monkeypatch.setenv("HC_AF_ODDS", "https://hc.example/ping/odds")
+    sent = []
+    monkeypatch.setattr(m.urllib.request, "urlopen",
+                        lambda req, timeout=10: sent.append(req.data) or type("R", (), {"read": lambda s: b""})())
+    monkeypatch.setattr(m, "dispatch", lambda *a: (_ for _ in ()).throw(RuntimeError(f"GET ?apiKey={AF_KEY} 500")))
+    assert m.main(cli(env) + ["af-odds"]) == 1
+    assert sent and all(AF_KEY.encode() not in (b or b"") for b in sent)
+
+
+# --- v0.5.2: backup status and off-box ---------------------------------------------------------------
+
+def test_backup_status_and_report_line(env, monkeypatch):
+    from collector import backup as b
+    cfg, con, fake, f = env
+    monkeypatch.delenv("RCLONE_REMOTE", raising=False)
+    assert b.main(["--config", str(cfg.db_path.parent.parent / "config.toml")]) == 0
+    st = b.status(cfg.db_path.parent)
+    assert st["problems"] == [] and st["local"]["last_attempt"]["result"] == "ok"
+    assert st["offbox"]["configured"] is False
+    from collector.__main__ import report
+    rep = report(con, cfg)
+    assert rep["backup"]["local"]["newest_file"].startswith("corners-")
+    assert set(rep["storage"]) >= {"archive_mb_last_24h", "archive_projected_gb_per_30d", "disk_free_gb"}
+
+
+def test_backup_stale_and_offbox_never_synced_are_problems(env, monkeypatch):
+    import os
+    from collector import backup as b
+    cfg, con, fake, f = env
+    r = b.backup(cfg.db_path, cfg.db_path.parent / "backups")
+    old = time.time() - 30 * 3600
+    os.utime(r["backup"], (old, old))
+    st = b.status(cfg.db_path.parent, offbox_configured=True, first_data_s=old - 3600)
+    assert "backup:no_backup_in_26h" in st["problems"] and "offbox:configured_but_never_synced" in st["problems"]
+
+
+def test_no_backup_yet_on_a_fresh_install_is_not_a_problem(env):
+    from collector import backup as b
+    cfg = env[0]
+    assert b.status(cfg.db_path.parent, offbox_configured=False, first_data_s=time.time() - 600)["problems"] == []
+
+
+def test_offbox_incomplete_copy_is_recorded_as_failed(env, monkeypatch, capsys):
+    from collector import backup as b
+    cfg, con, fake, f = env
+    run(con, "af_fixtures", lambda s: AF(cfg, con, f).call(s, "/leagues", {"id": 39, "season": 2026}, "x"))
+    monkeypatch.setenv("RCLONE_REMOTE", "corners-offbox:corners")
+    args = ["--config", str(cfg.db_path.parent.parent / "config.toml"), "--offbox-result", "ok",
+            "--copy-started", str(time.time() + 5)]
+    assert b.main(args + ["--remote-archive-files", "0"]) == 1          # remote is missing a file
+    st = b.status(cfg.db_path.parent, offbox_configured=True)
+    assert "offbox:last_sync_failed" in st["problems"]
+    assert b.main(args + ["--remote-archive-files", "1"]) == 0
+    assert b.status(cfg.db_path.parent, offbox_configured=True)["offbox"]["last_sync"]["result"] == "ok"
+
+
+def test_backup_check_file(env, capsys):
+    from collector import backup as b
+    cfg = env[0]
+    r = b.backup(cfg.db_path, cfg.db_path.parent / "backups")
+    assert b.main(["--check-file", r["backup"]]) == 0
+    assert '"integrity_check": "ok"' in capsys.readouterr().out
+
+
+def test_cli_close_report_reads_the_archive_without_calling_the_api(env, monkeypatch, capsys):
+    cfg, con, fake, f = env
+    rec = lambda t, p, a=True: {"createdAt": t, "price": p, "limit": 1, "active": a}  # noqa: E731
+    body = {"fixtureId": "idX", "bookmakers": {"pinnacle": {"markets": {
+        "101": {"outcomes": {"101": {"players": {"0": [rec("2026-10-10T11:20:00Z", 2.0)]}},
+                             "102": {"players": {"0": [rec("2026-10-10T11:20:00Z", 3.0),
+                                                       rec("2026-10-10T11:27:00Z", 3.0, False)]}}}}}}}}
+    fake.add("/v4/historical-odds", {"fixtureId": "idX", "bookmakers": "pinnacle"}, (200, body))
+    main = patched_main(monkeypatch, fake)
+    main(cli(env) + ["op-check-fixture", "idX", "--kickoff", "2026-10-10T11:30:00Z"])
+    capsys.readouterr()
+    n_calls = len(fake.calls)
+    assert main(cli(env) + ["close-report", "idX", "--kickoff", "2026-10-10T11:30:00Z"]) == 0
+    rep = json.loads(capsys.readouterr().out)
+    assert len(fake.calls) == n_calls                              # archive only
+    assert rep["by_market"]["101"] == {"series": 2, "with_close_v1": 1, "suspended_at_cutoff": 1,
+                                       "with_close_v1b": 1}
+    assert rep["suspended_at_cutoff_detail"][0]["suspended_for_min"] == 1.0
+    assert rep["start_sources_present"] == 1 and rep["counts_toward_g05a"] is False

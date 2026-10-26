@@ -16,6 +16,9 @@ SuccessExitStatus=3
 TimeoutStartSec=55min
 Nice=5
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Marks a timer-started run. A timer firing for a job outside active_jobs is refused
+# and reported by the watchdog; by-hand runs (deploy/run.sh) never carry this.
+Environment=CORNERS_TRIGGER=timer
 MemoryAccounting=yes
 # Measured: ~26 MB to parse and close-report a 59k-record history payload (7 MB JSON);
 # the whole process is expected well under 200 MB. The cap turns a runaway into a

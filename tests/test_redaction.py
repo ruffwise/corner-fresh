@@ -108,7 +108,7 @@ def test_personal_looking_field_on_data_endpoint_is_detected_not_altered(env, mo
     assert con.execute("SELECT rule, n FROM raw_redaction").fetchall() == [("detect:email", 1)]
     from collector.__main__ import main
     rc = main(["--config", str(cfg.db_path.parent.parent / "config.toml"), "watchdog"])
-    assert rc == 1 and "redaction_on_data_endpoint:api_football /fixtures:detect:email" in capsys.readouterr().out
+    assert rc == 1 and "detect:email fired on data endpoint api_football /fixtures" in capsys.readouterr().out
 
 
 def test_live_key_echoed_into_data_is_scrubbed_and_alerts(env, monkeypatch, capsys):
