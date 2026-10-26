@@ -1,4 +1,4 @@
-# Pinnacle-Close Benchmark Study — Design v0.5.2
+# Pinnacle-Close Benchmark Study — Design v0.5.3
 
 **Status.** Draft for review. Supersedes v0.4. When accepted, commit it as part of `prereg-0`, then sign and timestamp it (§13).
 **Date.** 2026-10-26.
@@ -7,8 +7,8 @@
 
 - `db/schema.sql` (v4 base), `db/migrations/005_v05.sql` (to v5) and `db/connect.py`
 - `db/migrations/006_v051.sql` (to v6; v0.5.2 adds no migration)
-- `collector/` and `deploy/`, plus `RUNBOOK.md` (v0.5.2)
-- `tests/`: 229 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
+- `collector/` and `deploy/`, plus `RUNBOOK.md` (v0.5.3)
+- `tests/`: 234 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
 - `analysis/power.py` and its output `analysis/power_output.md`
 
 Every number in this document comes from `analysis/power.py` unless a source is cited.
@@ -23,9 +23,11 @@ Every number in this document comes from `analysis/power.py` unless a source is 
 - 5,628 fixtures tracked across 16 league-seasons; 76 outcomes;
 - last 24 h: `af_odds` 24 of 24 slots, `af_results` 25, `af_fixtures` 4; 1,104 odds responses; 0 clock flags;
 - `af-bootstrap` passed (one bookmaker named `Pinnacle`, id 4);
-- nightly backup with restore test passing, **on the VM only** until RUNBOOK U5 is done.
+- v0.5.2 deployed 26 Oct: active jobs `af_fixtures`, `af_odds`, `af_results`, `op_history`; watchdog `ok`;
+- off-box copy live since 26 Oct (Azure Blob, Central India): first run 1,557 local = 1,557 remote archive files; restore drill from the remote copy passed (`integrity_check: ok`, 0 FK failures, user_version 6); delete refused to the VM identity (403) as designed;
+- measured growth: archive 27.96 MB per 24 h (0.84 GB per 30 days, api-football only); 25.5 GB free on the VM disk.
 
-OddsPapi steps (A10–A11) follow the v0.5.2 deploy.
+OddsPapi steps (A10–A11) follow the v0.5.3 deploy.
 
 **v0.5.2 changes** (no schema change):
 
@@ -37,6 +39,13 @@ OddsPapi steps (A10–A11) follow the v0.5.2 deploy.
 | C11 | **Suspended at the cutoff:** close-v1b registered now as a sensitivity rule, with a switching rule that uses suspension counts only (§0.2) | — |
 | C12 | **≥ 2 start sources** for a fixture to count toward G0.5a, with a floor on how many fixtures may lack them (§0.2) | §6 G0.5a denominator |
 | C13 | **Main-line rule** for G0.5 and the look-ahead selection (§0.2) | §6, which named the main line without defining it |
+
+**v0.5.3 changes** (no schema change):
+
+| # | Change | Supersedes |
+|---|---|---|
+| C14 | **By-hand runs never touch the plan or healthchecks.** Only a systemd timer run claims a planned slot and pings. A `run.sh` run always gets its own slot noted `by hand`; it can't collide with a completed slot, satisfy a missed one, raise a false `/fail`, or hide a broken timer with a success ping. By-hand slots are reported separately and excluded from G0.1 | v0.5.2, where a by-hand run of an active job claimed the current slot and failed with "already complete" |
+| C15 | **`raw_vs_requests` in the daily report:** why `raw_response` has more rows than `api_request` (extra pages, retries, requests that never produced a row), with a balance check | — |
 
 **v0.5 changes.** Each supersedes the section named.
 
@@ -100,6 +109,7 @@ OddsPapi steps (A10–A11) follow the v0.5.2 deploy.
    - Both are computed for every fixture and reported side by side per market family in the G0.5 report, with the suspended series listed (how long suspended, how far back the last active record was).
    - **Switching rule, applied once, at the first G0.5 evaluation:** a family moves to v1b only if, on the G0.5 sample, its G0.5a usable share is below 80% under v1, at or above 80% under v1b, and main-line suspension is the reason for the shortfall (v1 would reach 80% if suspended main lines counted). Then a new close-rule version (close-v2 = v1b for those families) is registered and applied to **every** fixture of the family, exploration and confirmation alike. Otherwise v1 stays.
    - The decision uses suspension counts only: no outcomes, forecasts or prices against outcomes.
+   - **A9 breakdown (26 Oct, one fixture, illustration only):** full-time 1X2 (market 101) closed on all 3 sides. Of the 22 suspended series, 20 had been suspended for 233 minutes to 27 days: withdrawn alternative lines. Only market 10496 was suspended briefly (4.5 min) and is bridged by v1b, giving 292 closes under v1b against 290 under v1. Market 10336 has 28 series, 3 of them suspended for days. This matches the expectation above, but it is one fixture. Families and main lines for 10336, 10496, 101936 and 10178 wait for the A10 catalog.
    - **Why not v1b as primary:** a suspended price is one the book had withdrawn, so it is a weaker benchmark, and a weaker benchmark makes "beating the close" easier. For any family that switches, the share of bridged closes is reported, and a confirmatory result must also hold with the bridged fixtures excluded.
 
 **Enforcement in the schema:**
@@ -156,7 +166,8 @@ The literal final-window mean and CI are still reported alongside.
 
 - `active_jobs` in `config/production.toml` is the one list. Today: `af_fixtures`, `af_odds`, `af_results`, `op_history`. `op_account` and `op_fixtures` join at RUNBOOK A11.
 - `plan` creates slots only for active jobs and deletes **pending** slots of inactive ones. Pending slots have no requests, so nothing observed is lost; claimed, complete, failed and missed slots are never touched.
-- `watchdog` marks misses only for active jobs. It also reports a timer that fired for an inactive job (`CORNERS_TRIGGER=timer` is set only by the systemd unit; a by-hand `run.sh` run of an inactive job gets its own unplanned slot and is fine).
+- Only systemd timer runs (`CORNERS_TRIGGER=timer`) claim planned slots and ping healthchecks. Every `run.sh` run gets a new slot noted `by hand`, never on a planned slot's timestamp, and sends no ping (v0.5.3).
+- `watchdog` marks misses only for active jobs. It also reports a timer that fired for an inactive job.
 - Every watchdog failure is POSTed to healthchecks with a one-line summary per check (job, what, when), so a real miss reads differently from noise. Job failure pings carry the error text, scrubbed of live keys.
 - `release.sh` enables exactly the active jobs' timers, disables the rest, and refuses a config without `af_odds`.
 
@@ -170,7 +181,7 @@ The literal final-window mean and CI are still reported alongside.
 
 **Monitoring:** `last_backup.json` and `last_offbox.json` feed the daily report (`backup`, `storage`) and the watchdog (no backup in 26 h, off-box failed or stale). `HC_BACKUP` gets the result with a reason on failure.
 
-**Growth and cost.** api-football's archive rate isn't measured yet; the daily report now shows `archive_mb_last_24h` and the 30-day projection (RUNBOOK U4 measures it today). The OddsPapi part can be bounded from the one measured payload: the Arsenal v Leeds history was about 7 MB of JSON (59k records). Assuming gzip reduces it 8–15 times, that is roughly 0.5–0.9 MB per fixture: about 0.15–0.3 GB a month forward (about 325 fixtures a month), plus about 0.8–1.5 GB once for the backfill since January. Cost is not a deciding factor at any plausible rate. At West Europe Hot LRS list prices ($0.0196 per GB-month; writes $0.054 per 10,000), about 1,200 new files a day cost about $0.19 a month to write. Growth of 1, 3 or 10 GB a month costs about $1.5, $4.6 or $15 in storage over the first year, plus about $2.3 for writes.
+**Growth and cost.** Measured on 26 Oct: 27.96 MB of compressed archive per 24 h from api-football, 0.84 GB per 30 days; the daily report tracks it (`storage`). The OddsPapi part can be bounded from the one measured payload: the Arsenal v Leeds history was about 7 MB of JSON (59k records). Assuming gzip reduces it 8–15 times, that is roughly 0.5–0.9 MB per fixture: about 0.15–0.3 GB a month forward (about 325 fixtures a month), plus about 0.8–1.5 GB once for the backfill since January. Combined: about 1.0–1.15 GB a month forward, plus the one-off backfill. The 25.5 GB free on the VM lasts about 20 months at that rate (the report's 912 days counts api-football only). Cost at Central India Hot LRS list prices ($0.02 per GB-month; writes $0.055 per 10,000): about 1,200 new files a day cost about $0.20 a month to write, and about 1.1 GB a month of growth costs about $1.7 in storage over the first year. That is roughly $4 for the first year in total.
 
 ---
 
@@ -461,7 +472,7 @@ The old project's real question was "do my forecasts beat the market?" This is t
 | Gate | Pass condition |
 |---|---|
 | G0.0 | `af-bootstrap` finds exactly one bookmaker named `Pinnacle`. If not, Pinnacle snapshots, price agreement and capture-time features are unavailable, and G0.5c cannot run. Report, then decide |
-| G0.1 Ledger | ≥ 99.0% of slots of **active** jobs complete over 14 days, no 2 consecutive misses, every miss explained |
+| G0.1 Ledger | ≥ 99.0% of planned slots of **active** jobs complete over 14 days (by-hand slots excluded), no 2 consecutive misses, every miss explained |
 | G0.3 Off-box | Nightly off-box copy `ok` for 7 consecutive nights, and one restore drill from the remote copy passes `--check-file` (RUNBOOK U5–U6) |
 | G0.2 Clock | `clock_ok = 0` on ≤ 1% of 200 responses; chrony p99 offset < 50 ms |
 | G0.4 | api-football odds `update` granularity resolved |
@@ -502,7 +513,7 @@ Unchanged:
 
 **`prereg-0` contents:**
 - this document;
-- G0.5's definitions;
+- G0.5's definitions, including §0.2 items 6–8 (main line, start sources, close-v1b and its switching rule) and §0.3 (L1, L2 inspection, 2% cap, causes);
 - the stop rules;
 - the 6-rule budget;
 - P13–P18;
@@ -521,7 +532,8 @@ Unchanged:
 | Raw collector, quota guard, slot ledger and watchdog, backup with restore test, systemd units | **Done**; api-football part running since 25 Oct |
 | v0.5: redaction and archive scrub; close-v1 and its schema; look-ahead control; null-name catalog; reverse-unmapped alert; schema v5 migration; read-only releases; real-payload tests | **Done**; deployed 25 Oct |
 | v0.5.1 hotfix: endpoint-scoped redaction, damage repair (schema v6) | **Done**; deployed and repaired 25 Oct |
-| v0.5.2: active jobs, named watchdog failures, timer drift guard; off-box copy and backup status; close-v1b, main-line rule, start-source rule, L2 inspection gate; `close-report` | **Done.** Deploy with RUNBOOK Part U |
+| v0.5.2: active jobs, named watchdog failures, timer drift guard; off-box copy and backup status; close-v1b, main-line rule, start-source rule, L2 inspection gate; `close-report` | **Done**; deployed 26 Oct, off-box copy and restore drill verified |
+| v0.5.3: by-hand runs get their own slots and never ping; `raw_vs_requests` in the report | **Done.** Deploy with RUNBOOK Part V |
 | Mapping tooling (propose, load from git, apply, kickoff audit, manual sample) | **Done** |
 | M6: parsers into `quote` and `price_history` with allowlists from the day-1 dumps; `price_agreement` audit | Next. Needs the day-1 dumps |
 | M7: G0.5 report, coverage ledger job, de-vig oracle test (R13), training-cutoff guard (R14) | After M6 |
@@ -540,10 +552,9 @@ Unchanged:
 - Look-ahead gate L1/L2 accepted, with L2 flags going to inspection, never dropped (§0.3).
 - G0.5a needs ≥ 2 start sources per counted fixture (§0.2 item 7).
 
-**Open (fixed in this draft; confirm or change before `prereg-0`):**
-1. The L2 flag-rate cap of 2% and the four causes (§0.3).
-2. close-v1b and its switching rule (§0.2 item 8), and the 80% floor on fixtures with ≥ 2 start sources (item 7).
-3. The main-line rule at cutoff − 60 min, and Over as the look-ahead selection (§0.2 item 6, §0.3).
+- Confirmed for `prereg-0`: the 2% L2 flag cap and the four causes (§0.3); close-v1b and its switching rule (§0.2 item 8); the 80% floor on fixtures with ≥ 2 start sources (item 7); the main-line rule at cutoff − 60 min, with Over as the look-ahead selection (item 6).
+
+**Open:** none in the design. Next is the OddsPapi day-1 work (RUNBOOK A10–A11), then M6.
 
 ---
 
@@ -562,7 +573,8 @@ Unchanged:
 - [Azure free account FAQ](https://azure.microsoft.com/en-us/free/free-account-faq/)
 - [penaltyblog implied-probability methods](https://penaltyblog.readthedocs.io/en/latest/implied/implied.html)
 - [OddsPapi API concepts: market and outcome ids](https://docs.oddspapi.io/api-reference/concepts.md)
-- [Azure retail prices API (Hot and Cool LRS, West Europe)](https://prices.azure.com/api/retail/prices)
+- [Azure retail prices API (Hot LRS, Central India)](https://prices.azure.com/api/retail/prices)
+- [healthchecks integrations page template (Test! button)](https://github.com/healthchecks/healthchecks/blob/master/templates/front/channels.html)
 - [Azure Blob time-based retention and immutability](https://learn.microsoft.com/en-us/azure/storage/blobs/immutable-time-based-retention-policy-overview)
 - [Authorize blob access with Microsoft Entra ID](https://learn.microsoft.com/en-us/azure/storage/blobs/authorize-access-azure-active-directory)
 - [rclone Azure Blob backend](https://rclone.org/azureblob/), [downloads](https://rclone.org/downloads/), [release signing](https://rclone.org/release_signing/)

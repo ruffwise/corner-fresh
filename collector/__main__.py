@@ -31,9 +31,19 @@ JOB_OF = {"af-fixtures": "af_fixtures", "af-odds": "af_odds", "af-results": "af_
           "op-backfill": "op_backfill", "af-backfill": "af_results", "repair-damaged": "af_results"}
 
 
+def by_timer() -> bool:
+    """True only for runs started by systemd (deploy/corners@.service sets CORNERS_TRIGGER=timer)."""
+    return os.environ.get("CORNERS_TRIGGER") == "timer"
+
+
 def ping(cfg, cmd: str, suffix: str = "", body: str | None = None) -> None:
-    """Healthchecks ping. A body (POST) is stored with the ping and shown in the
-    check's event log, so a failure says what failed; trimmed to 8 kB."""
+    """Healthchecks ping, for TIMER runs only. A by-hand run never pings: its failure
+    is not a missed schedule, and its success must not hide one (a manual success
+    near the scheduled time would satisfy the check while the timer is broken).
+    A body (POST) is stored with the ping and shown in the check's event log, so a
+    failure says what failed; trimmed to 8 kB."""
+    if not by_timer():
+        return
     url = cfg.healthchecks.get(cmd.replace("-", "_"))
     if not url:
         return
@@ -204,21 +214,20 @@ def main(argv=None) -> int:
 
     job = JOB_OF[a.cmd]
     timer_cmd = a.cmd in ("af-fixtures", "af-odds", "af-results", "op-account", "op-fixtures", "op-history")
-    by_timer = os.environ.get("CORNERS_TRIGGER") == "timer"      # set only in deploy/corners@.service
-    if timer_cmd and by_timer and job not in cfg.active_jobs:
+    if timer_cmd and by_timer() and job not in cfg.active_jobs:
         ledger.refuse_inactive_timer_run(con, job)
         msg = (f"{a.cmd}: its timer fired but {job} is not in active_jobs; did nothing. Add it to active_jobs "
                f"and deploy, or disable corners-{a.cmd}.timer")
         print(msg, file=sys.stderr)
         ping(cfg, a.cmd, "/fail", msg)
         return 5
-    # A by-hand run of an active scheduled job claims that job's current slot; a by-hand
-    # run of an inactive one gets its own unplanned slot, so it never touches the plan.
-    scheduled = timer_cmd and job in cfg.active_jobs
+    # Only a timer run claims a planned slot. Every by-hand run (run.sh) gets a slot of
+    # its own, noted 'by hand', whatever the job: it never touches the plan.
+    scheduled = timer_cmd and by_timer()
     fetcher = Fetcher(con, Archive(cfg.archive_dir), secrets=(cfg.af_key, cfg.op_key))
     ping(cfg, a.cmd, "/start")
     try:
-        with ledger.run_slot(con, job, scheduled_for=None if scheduled else now_ms(), unplanned_ok=not scheduled) as slot:
+        with ledger.run_slot(con, job, by_hand=not scheduled) as slot:
             result = dispatch(cfg, con, fetcher, slot, a)
         out(result)
         if isinstance(result, dict) and result.get("alert"):
@@ -469,6 +478,30 @@ def storage(cfg, t_ms: int) -> dict:
             "days_until_disk_full_at_this_rate": round(du.free / day_bytes) if day_bytes else None}
 
 
+def raw_vs_requests(con) -> dict:
+    """Why raw_response has more rows than api_request, all time:
+    raw_rows = requests - requests_without_raw + extra_pages + retries, where
+      extra_pages = pages beyond the first, per request (paged endpoints);
+      retries     = rows beyond one per (request, page): repeated attempts;
+      requests_without_raw = requests that never produced a row (refused before sending)."""
+    one = lambda sql: con.execute(sql).fetchone()[0] or 0  # noqa: E731
+    requests = one("SELECT count(*) FROM api_request")
+    raw_rows = one("SELECT count(*) FROM raw_response")
+    without = one("SELECT count(*) FROM api_request a WHERE NOT EXISTS"
+                  " (SELECT 1 FROM raw_response r WHERE r.request_id = a.request_id)")
+    extra_pages = one("SELECT sum(n - 1) FROM (SELECT count(DISTINCT page) n FROM raw_response GROUP BY request_id)")
+    retries = one("SELECT sum(n - 1) FROM (SELECT count(*) n FROM raw_response GROUP BY request_id, page)")
+    by_ep = {f"{p} {e}": n for p, e, n in con.execute(
+        "SELECT a.provider, a.endpoint, count(*) - count(DISTINCT r.request_id || '/' || r.page)"
+        " FROM raw_response r JOIN api_request a ON a.request_id = r.request_id"
+        " GROUP BY a.provider, a.endpoint HAVING count(*) > count(DISTINCT r.request_id || '/' || r.page)")}
+    return {"requests": requests, "raw_rows": raw_rows, "extra_pages": extra_pages, "retries": retries,
+            "requests_without_raw": without,
+            "attempt_gt_1_rows": one("SELECT count(*) FROM raw_response WHERE attempt > 1"),
+            "balanced": raw_rows == requests - without + extra_pages + retries,
+            "retries_by_endpoint": by_ep}
+
+
 def report(con, cfg=None) -> dict:
     t = now_ms()
     day = t - 86_400_000
@@ -477,7 +510,10 @@ def report(con, cfg=None) -> dict:
     return {
         "generated_utc": datetime.fromtimestamp(t / 1000, tz=timezone.utc).isoformat(),
         "slots_last_24h": q("SELECT job, status, count(*) FROM capture_slot WHERE scheduled_for_ms BETWEEN ? AND ?"
-                            " GROUP BY job, status ORDER BY job, status", day, t),
+                            " AND note IS NOT ? GROUP BY job, status ORDER BY job, status", day, t, ledger.BY_HAND_NOTE),
+        "by_hand_runs_last_24h": q("SELECT job, status, count(*) FROM capture_slot WHERE started_at_ms > ?"
+                                   " AND note IS ? GROUP BY job, status ORDER BY job, status", day, ledger.BY_HAND_NOTE),
+        "raw_vs_requests": raw_vs_requests(con),
         "raw_last_24h": q("SELECT a.provider, a.endpoint, sum(r.usable), count(*) FROM raw_response r"
                           " JOIN api_request a ON a.request_id=r.request_id WHERE r.received_at_ms > ?"
                           " GROUP BY a.provider, a.endpoint", day),

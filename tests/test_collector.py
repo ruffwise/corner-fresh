@@ -695,6 +695,7 @@ def test_watchdog_failure_names_the_missed_jobs_in_the_ping(env, monkeypatch, ca
     import collector.__main__ as m
     cfg, con, fake, f = env
     monkeypatch.setenv("HC_WATCHDOG", "https://hc.example/ping/abc")
+    monkeypatch.setenv("CORNERS_TRIGGER", "timer")
     sent = []
     monkeypatch.setattr(m.urllib.request, "urlopen",
                         lambda req, timeout=10: sent.append((req.full_url, req.data)) or type(
@@ -737,6 +738,7 @@ def test_failure_ping_never_carries_a_key(env, monkeypatch, capsys):
     import collector.__main__ as m
     cfg, con, fake, f = env
     monkeypatch.setenv("HC_AF_ODDS", "https://hc.example/ping/odds")
+    monkeypatch.setenv("CORNERS_TRIGGER", "timer")
     sent = []
     monkeypatch.setattr(m.urllib.request, "urlopen",
                         lambda req, timeout=10: sent.append(req.data) or type("R", (), {"read": lambda s: b""})())
@@ -819,3 +821,83 @@ def test_cli_close_report_reads_the_archive_without_calling_the_api(env, monkeyp
                                        "with_close_v1b": 1}
     assert rep["suspended_at_cutoff_detail"][0]["suspended_for_min"] == 1.0
     assert rep["start_sources_present"] == 1 and rep["counts_toward_g05a"] is False
+
+
+# --- v0.5.3: by-hand runs never touch the plan or healthchecks ---------------------------------------
+
+def hc_spy(monkeypatch):
+    import collector.__main__ as m
+    sent = []
+    monkeypatch.setattr(m.urllib.request, "urlopen",
+                        lambda req, timeout=10: sent.append(req.full_url) or type("R", (), {"read": lambda s: b""})())
+    return sent
+
+
+def test_by_hand_run_of_active_job_after_its_slot_completed(env, monkeypatch, capsys):   # the 26 Oct bug
+    cfg, con, fake, f = env
+    monkeypatch.setenv("HC_AF_FIXTURES", "https://hc.example/ping/fx")
+    sent = hc_spy(monkeypatch)
+    main = patched_main(monkeypatch, fake)
+    fake.add("/fixtures", {"league": 39, "season": 2026}, (200, af_page([])))
+    monkeypatch.setenv("CORNERS_TRIGGER", "timer")
+    assert main(cli(env) + ["af-fixtures"]) == 0                       # the timer run completes its slot
+    planned = con.execute("SELECT slot_id, status, note FROM capture_slot WHERE job='af_fixtures'").fetchall()
+    assert [r[1] for r in planned] == ["complete"] and sent            # and pings
+    monkeypatch.delenv("CORNERS_TRIGGER")
+    sent.clear()
+    assert main(cli(env) + ["af-fixtures"]) == 0                       # by hand, same period: no collision
+    rows = con.execute("SELECT status, note FROM capture_slot WHERE job='af_fixtures' ORDER BY slot_id").fetchall()
+    assert rows == [("complete", "unplanned: no pending slot existed"), ("complete", ledger.BY_HAND_NOTE)]
+    assert sent == []                                                  # no healthchecks ping at all
+
+
+def test_by_hand_failure_does_not_ping_fail(env, monkeypatch, capsys):
+    cfg, con, fake, f = env
+    monkeypatch.setenv("HC_AF_ODDS", "https://hc.example/ping/odds")
+    monkeypatch.setenv("AF_KEY", "")
+    sent = hc_spy(monkeypatch)
+    from collector.__main__ import main
+    assert main(cli(env) + ["af-odds"]) == 1
+    assert sent == [] and "AF_KEY is not set" in capsys.readouterr().err
+
+
+def test_by_hand_run_never_claims_or_hides_a_missed_slot(env):
+    cfg, con, fake, f = env
+    t = now_ms()
+    ledger.plan(con, cfg.active_jobs, horizon_h=48, t=t - 3 * H)
+    missed = ledger.watchdog(con, cfg.active_jobs, t=t)
+    assert any(j == "af_odds" for j, _ in missed)
+    before = con.execute("SELECT count(*) FROM capture_slot WHERE job='af_odds' AND status='missed'").fetchone()
+    with ledger.run_slot(con, "af_odds", by_hand=True):
+        pass
+    assert con.execute("SELECT count(*) FROM capture_slot WHERE job='af_odds' AND status='missed'").fetchone() == before
+
+
+def test_by_hand_slot_never_lands_on_a_planned_timestamp(env, monkeypatch):
+    cfg, con, fake, f = env
+    t = now_ms()
+    s_for = ledger.nominal("af_odds", t) + H
+    con.execute("INSERT INTO capture_slot (job, scheduled_for_ms) VALUES ('af_odds', ?)", (s_for,))
+    monkeypatch.setattr(ledger, "now_ms", lambda: s_for)
+    with ledger.run_slot(con, "af_odds", by_hand=True) as slot:
+        pass
+    assert con.execute("SELECT status FROM capture_slot WHERE scheduled_for_ms=?", (s_for,)).fetchone() == ("pending",)
+    assert con.execute("SELECT scheduled_for_ms FROM capture_slot WHERE slot_id=?", (slot.slot_id,)).fetchone() == (s_for + 1,)
+
+
+def test_report_explains_raw_rows_versus_requests(env):
+    from collector.__main__ import report
+    cfg, con, fake, f = env
+    # one request with 2 pages (an extra page), one request retried once after a 500
+    fake.add("/odds", {"league": 39, "season": 2026, "date": "2026-10-10"},
+             (200, af_page([{"fixture": {"id": 1}}], 1, 2)))
+    fake.add("/odds", {"league": 39, "season": 2026, "date": "2026-10-10", "page": 2},
+             (200, af_page([{"fixture": {"id": 2}}], 2, 2)))
+    run(con, "af_odds", lambda s: AF(cfg, con, f).call(s, "/odds", {"league": 39, "season": 2026, "date": "2026-10-10"}, "x"))
+    fake.add("/fixtures", {"league": 39, "season": 2026}, (500, {"message": "boom"}), (200, af_page([])))
+    run(con, "af_fixtures", lambda s: AF(cfg, con, f).call(s, "/fixtures", {"league": 39, "season": 2026}, "x"))
+    r = report(con, cfg)["raw_vs_requests"]
+    assert r["requests"] == 2 and r["raw_rows"] == 4
+    assert r["extra_pages"] == 1 and r["retries"] == 1 and r["requests_without_raw"] == 0
+    assert r["raw_rows"] == r["requests"] + r["extra_pages"] + r["retries"] - r["requests_without_raw"]
+    assert r["retries_by_endpoint"] == {"api_football /fixtures": 1}

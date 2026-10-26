@@ -121,18 +121,37 @@ class Slot:
         self.basis.append(basis)
 
 
+BY_HAND_NOTE = "by hand"
+
+
 @contextmanager
-def run_slot(con: sqlite3.Connection, job: str, scheduled_for: int | None = None, unplanned_ok: bool = False):
+def run_slot(con: sqlite3.Connection, job: str, scheduled_for: int | None = None, unplanned_ok: bool = False,
+             by_hand: bool = False):
     """Claim the slot for this run, yield it, then close it.
+
+    by_hand=True (any run not started by a systemd timer): always a NEW slot of its
+    own, noted 'by hand'. It never claims, completes or fails a planned slot, so a
+    manual run can neither collide with a completed slot nor hide a missed one.
 
     Closing as 'complete' goes through the schema trigger, which refuses if
     completed requests != expected requests. Any exception marks it failed.
     """
     t = now_ms()
-    s_for = scheduled_for if scheduled_for is not None else (nominal(job, t) if job in CADENCE else t)
-    row = con.execute("SELECT slot_id, status FROM capture_slot WHERE job=? AND scheduled_for_ms=?",
-                      (job, s_for)).fetchone()
-    if row is None:
+    if by_hand:
+        s_for = t
+        while con.execute("SELECT 1 FROM capture_slot WHERE job=? AND scheduled_for_ms=?", (job, s_for)).fetchone():
+            s_for += 1                                   # never land on a planned slot's timestamp
+        slot_id = con.execute(
+            "INSERT INTO capture_slot (job, scheduled_for_ms, status, started_at_ms, note) VALUES (?,?,'running',?,?)",
+            (job, s_for, t, BY_HAND_NOTE)).lastrowid
+        row = None
+    else:
+        s_for = scheduled_for if scheduled_for is not None else (nominal(job, t) if job in CADENCE else t)
+        row = con.execute("SELECT slot_id, status FROM capture_slot WHERE job=? AND scheduled_for_ms=?",
+                          (job, s_for)).fetchone()
+    if by_hand:
+        pass
+    elif row is None:
         slot_id = con.execute(
             "INSERT INTO capture_slot (job, scheduled_for_ms, status, started_at_ms, note) VALUES (?,?,'running',?,?)",
             (job, s_for, t, None if unplanned_ok else "unplanned: no pending slot existed")).lastrowid

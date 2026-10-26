@@ -1,14 +1,65 @@
-# Runbook v0.5.2
+# Runbook v0.5.3
 
-**Part U** upgrades the running v0.5.1 install to v0.5.2 and sets up the off-box copy. Do it next.
-**Part A-H** (the v0.5.1 hotfix) and Part A up to A9 are done. After Part U, continue with A7, then A10–A11.
+**Part V** upgrades v0.5.2 to v0.5.3 (by-hand runs). Do it next, then A8, A10 and A11.
+**Done:** Part U (v0.5.2 and the off-box copy, 26 Oct), Part A-H (the v0.5.1 hotfix), and Part A up to A9 and A7.
 **Part B** is a fresh install, for reference.
 
 Run all commands on the VM unless a step says otherwise. Replace `OWNER` with your GitHub user or organisation.
 
 ---
 
-## Part U — Upgrade to v0.5.2 (do this next)
+## Part V — Upgrade to v0.5.3 (do this next)
+
+**What it fixes.** In v0.5.2, a by-hand `run.sh` run of an active job claimed that job's current planned slot. If the timer had already completed it, the run failed with `slot ... already complete` and sent a false `/fail` to healthchecks.
+
+Now only a systemd timer run claims a planned slot and pings healthchecks. Every `run.sh` run, of any job:
+- gets its own slot, noted `by hand`;
+- never completes, fails or satisfies a planned slot, so a missed slot stays missed;
+- never pings healthchecks. A by-hand failure isn't a missed schedule, and a by-hand success near the scheduled time would hide a broken timer.
+
+The daily report lists by-hand runs separately (`by_hand_runs_last_24h`) and leaves them out of `slots_last_24h`. It also gains `raw_vs_requests` (V4). No schema change, no timer change.
+
+### V1. Bring the commit into your clone and push (as `azureuser`)
+
+```bash
+scp corner-fresh-v053.bundle azureuser@<vm>:~/          # from your PC
+cd ~/corner-fresh
+git fetch ~/corner-fresh-v053.bundle main
+git merge --ff-only FETCH_HEAD
+git log --oneline | head -2        # top line: "v0.5.3: ..."
+git push
+```
+
+### V2. Deploy
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh main
+```
+
+**Expected:** `"note": "already current"`, no `enabled` or `disabled` lines, `pending_removed_for_inactive_jobs: {}`, and watchdog `"summary": "ok"`. The release's own `plan` and `watchdog` runs are by hand now, so they no longer ping healthchecks; the 10-minute watchdog timer keeps doing that.
+
+### V3. Repeat the by-hand run that failed
+
+```bash
+sudo /opt/corners/app/deploy/run.sh af-fixtures
+sudo -u corners sqlite3 /opt/corners/data/corners.db \
+  "SELECT slot_id, status, note, datetime(scheduled_for_ms/1000,'unixepoch') FROM capture_slot
+   WHERE job='af_fixtures' ORDER BY slot_id DESC LIMIT 3;"
+```
+
+**Expected:** the run succeeds; the newest row is `complete|by hand`; the planned rows are untouched; healthchecks shows no new event for `af_fixtures`.
+
+### V4. Raw rows versus requests
+
+```bash
+sudo /opt/corners/app/deploy/run.sh report | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["raw_vs_requests"], indent=2))'
+```
+
+**Expected:** `balanced: true`, with `raw_rows = requests − requests_without_raw + extra_pages + retries`. Your restore drill showed 1,557 raw rows against 1,552 requests. The 5 extra rows are pages beyond the first of a paged request (`extra_pages`), repeated attempts (`retries`, which should equal `attempt_gt_1_rows`), or both. `retries_by_endpoint` says where any retries happened. Send me the block if `balanced` is false, or if `retries` differs from `attempt_gt_1_rows`.
+
+---
+
+## Part U — Upgrade to v0.5.2 (done 26 Oct)
 
 **What it fixes.**
 - **Alert noise.** Slots are planned, and checked by the watchdog, only for the jobs listed in `active_jobs` in `config/production.toml`. `release.sh` enables exactly those timers. A timer that fires for any other job does nothing and fails the watchdog. Every watchdog failure now names what failed in the healthchecks event.
@@ -530,7 +581,8 @@ healthchecks.io is the only alarm if the VM itself goes down. Create one check p
 
 1. Paste each ping URL into `/etc/corners/secrets.env`. Each job reads it at its next start; no restart is needed.
 2. Point the integrations at an address and a phone channel you will actually see. Telegram works.
-3. **Test it:** pick a check, press **Pause**, then **Resume**. You should get the alert.
+3. **Test the alert path.** In healthchecks, open **Integrations** and press **Test!** on each integration (email, phone). Each should deliver a test notification. Pausing and resuming a check does **not** send an alert.
+4. **Optional end-to-end test:** create a throwaway check with a 1-minute period and 1-minute grace, never ping it, wait for the DOWN alert, then delete the check.
 
 ### A8. Azure settings that would otherwise stop collection
 
@@ -581,16 +633,22 @@ Send me the output. These fields matter:
 
 ### A10. OddsPapi day-1 steps (formerly 7, 9 and 10)
 
+Every command here is a by-hand run (v0.5.3): each gets its own `by hand` slot and sends no healthchecks ping. None of these jobs is in `active_jobs` yet, and that stays so until A11 step 6.
+
 1. **Quota reading (free):**
    ```bash
    sudo /opt/corners/app/deploy/run.sh op-account
    ```
-   It now prints only `request_limit`, `request_count` and `fields_present`, never the body.
+   It now prints only `request_limit`, `request_count` and `fields_present`, never the body. This is the first live test of field redaction on a personal endpoint. Afterwards, `report` → `redaction_last_24h` should list `field:` rules against `oddspapi /v4/account` only.
 
 2. **Catalog (2 billable calls):**
    ```bash
    sudo /opt/corners/app/deploy/run.sh op-catalog --sport-id 10
    sudo -u corners cat /opt/corners/data/review/day1_oddspapi_tournaments.json | head -50
+   ```
+   Note the `markets_raw_id` it prints. Then re-run the A9 breakdown with market families, and send me `by_market` and `by_family`. This confirms the family and main line of markets 10336, 10496, 101936 and 10178:
+   ```bash
+   sudo /opt/corners/app/deploy/run.sh close-report id1000001772221292 --kickoff 2026-10-10T11:30:00Z --markets-raw-id <markets_raw_id>
    ```
 
 3. **Config commit.** In your working clone (`~/corner-fresh`):
@@ -728,6 +786,7 @@ Until this step is done, CI fails one test, `test_every_endpoint_has_a_real_payl
 |---|---|---|
 | `QUOTA REFUSED` | The guard did its job: nothing billable was sent | Check `op-account`. Don't raise the budget without a written reason |
 | `op-fixtures` exit 4 / healthchecks fail | Unmapped share above 10% for the next 72 h | Read `unmapped_next_72h`. `candidate_unmapped` means review the team map; `no_candidate` means a relist was attempted |
+| `slot <job>@<ms> already complete` | Only in v0.5.2: a by-hand run collided with a completed planned slot | Deploy v0.5.3 (Part V); by-hand runs then get their own slot |
 | A slot is `failed` | A request failed after retries | The raw attempts are in the archive; `report` shows which endpoint |
 | A slot is `missed` | VM down, or the timer didn't fire | `systemctl status corners@<job>` and `journalctl -u corners@<job>` |
 | `release.sh` stuck "waiting for quiet window" | A job is running, or it is outside :21–:28 | Wait. It never switches while a job runs |
