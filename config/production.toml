@@ -20,27 +20,35 @@ active_jobs = ["af_fixtures", "af_odds", "af_results", "op_history"]
 # estimate (DESIGN v0.4 §8) depends on fixtures per week. Trim it if you prefer.
 [[leagues]]
 league_id = 39     # Premier League
+oddspapi_tournament_id = 17
 season = 2026
 [[leagues]]
 league_id = 40     # Championship
+oddspapi_tournament_id = 18
 season = 2026
 [[leagues]]
 league_id = 2      # UEFA Champions League
+oddspapi_tournament_id = 7
 season = 2026
 [[leagues]]
 league_id = 140    # La Liga
+oddspapi_tournament_id = 8
 season = 2026
 [[leagues]]
 league_id = 135    # Serie A
+oddspapi_tournament_id = 23
 season = 2026
 [[leagues]]
 league_id = 78     # Bundesliga
+oddspapi_tournament_id = 35
 season = 2026
 [[leagues]]
 league_id = 61     # Ligue 1
+oddspapi_tournament_id = 34
 season = 2026
 [[leagues]]
 league_id = 3      # UEFA Europa League
+oddspapi_tournament_id = 679
 season = 2026
 
 # Exploration seasons (2025/26): needed so OddsPapi history since January 2026
@@ -50,27 +58,35 @@ season = 2026
 # `run.sh af-backfill`.
 [[leagues]]
 league_id = 39
+oddspapi_tournament_id = 17
 season = 2025
 [[leagues]]
 league_id = 40
+oddspapi_tournament_id = 18
 season = 2025
 [[leagues]]
 league_id = 2
+oddspapi_tournament_id = 7
 season = 2025
 [[leagues]]
 league_id = 140
+oddspapi_tournament_id = 8
 season = 2025
 [[leagues]]
 league_id = 135
+oddspapi_tournament_id = 23
 season = 2025
 [[leagues]]
 league_id = 78
+oddspapi_tournament_id = 35
 season = 2025
 [[leagues]]
 league_id = 61
+oddspapi_tournament_id = 34
 season = 2025
 [[leagues]]
 league_id = 3
+oddspapi_tournament_id = 679
 season = 2025
 
 [api_football]
@@ -84,6 +100,6 @@ quota_reserve = 50
 fixtures_refresh_days = 28       # 8 tournaments -> ~9 billable calls/month
 # One-off: set to "2026-01-01T00:00:00Z" for the first listing so history
 # back to January is discoverable, then remove it.
-# fixtures_from = "2026-01-01T00:00:00Z"
+fixtures_from = "2026-01-01T00:00:00Z"
 history_delay_h = 3.0
 history_max_per_run = 60
