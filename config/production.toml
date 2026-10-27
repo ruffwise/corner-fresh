@@ -100,6 +100,6 @@ quota_reserve = 50
 fixtures_refresh_days = 28       # 8 tournaments -> ~9 billable calls/month
 # One-off: set to "2026-01-01T00:00:00Z" for the first listing so history
 # back to January is discoverable, then remove it.
-fixtures_from = "2026-01-01T00:00:00Z"
+# fixtures_from = "2026-01-01T00:00:00Z"
 history_delay_h = 3.0
 history_max_per_run = 60
