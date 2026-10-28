@@ -11,7 +11,7 @@ review_dir = "/opt/corners/data/review"
 #   - a timer that fires for a job not listed here does nothing and fails the watchdog.
 # Add op_account and op_fixtures at RUNBOOK A11 step 6 (commit, then release.sh).
 # op_history is free and does nothing until mappings exist.
-active_jobs = ["af_fixtures", "af_odds", "af_results", "op_history"]
+active_jobs = ["af_fixtures", "af_odds", "af_results"]
 
 # Leagues to track. api-football ids; season = starting year (2026 = 2026/27).
 # oddspapi_tournament_id: fill in from data/review/day1_oddspapi_tournaments.json
