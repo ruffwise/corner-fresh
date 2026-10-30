@@ -1,14 +1,67 @@
-# Runbook v0.5.4
+# Runbook v0.5.5
 
-**Part W** upgrades v0.5.3 to v0.5.4 (op_history fixes, verified timer sync, history-window probe). Do it next, then A11.
-**Done:** Part V (v0.5.3, 27 Oct), Part U (v0.5.2 and the off-box copy, 26 Oct), Part A-H (the v0.5.1 hotfix), and Part A up to A10.
+**Part X** upgrades v0.5.4 to v0.5.5 and refreshes the server clone once, so `release.sh` stops running a stale copy of itself. Do it next, then A11.
+**Done:** Part W (v0.5.4, 30 Oct; W6 is due after 00:00 UTC 1 Nov), Part V, Part U, Part A-H, and Part A up to A10.
 **Part B** is a fresh install, for reference.
 
 Run all commands on the VM unless a step says otherwise. Replace `OWNER` with your GitHub user or organisation.
 
 ---
 
-## Part W — Upgrade to v0.5.4 (do this next)
+## Part X — Upgrade to v0.5.5 (do this next)
+
+**Why the timer table never printed.** `release.sh` runs from the server clone's working tree, `/opt/corners/repo/deploy/release.sh`. Its `git fetch` updates the clone's objects but never that file. So every deploy since b9c09f6 (v0.5.2, v0.5.3 and v0.5.4) ran the b9c09f6 script. That script has no job list, no timer step, no `plan` post-check and no `sync-timers.sh` call (DESIGN §0.7, corrected). From v0.5.5, `release.sh` re-executes itself from `origin/main` and prints which script it is running. The stale copy doesn't have that logic yet, so X2 refreshes the working tree **once**.
+
+**Also in v0.5.5:**
+- `op-backfill --max` is now the real cap; it was silently limited to 60;
+- the K-outcome confirmatory tests (`analysis/prereg_tests.py`);
+- the G0.5a rule for settled `no_history`.
+
+No schema change, no timer change.
+
+### X1. Merge the commit into your clone and push (as `azureuser`)
+
+It doesn't touch `config/production.toml`, so it merges cleanly onto your merge commit 2f969b5:
+
+```bash
+scp corner-fresh-v055.bundle azureuser@<vm>:~/          # from your PC
+cd ~/corner-fresh
+git fetch ~/corner-fresh-v055.bundle main
+git merge --no-edit FETCH_HEAD          # expect "Merge made by the 'ort' strategy"
+git log --oneline --graph | head -6
+git push
+```
+
+### X2. Refresh the server clone's working tree (once)
+
+```bash
+sudo git -C /opt/corners/repo fetch --quiet origin
+sudo git -C /opt/corners/repo checkout --quiet --detach origin/main
+sudo git -C /opt/corners/repo log -1 --oneline                # your merge commit from X1
+sudo grep -c 'deploy script from' /opt/corners/repo/deploy/release.sh   # 1
+```
+
+A detached checkout is fine: nothing builds from that working tree. Releases come from `git archive` of a commit, and the team-map loader reads committed objects.
+
+### X3. Deploy
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh main
+```
+
+**Expected:**
+- the first line reads `== release <sha12> (main), deploy script from <sha12> (origin/main)`;
+- six `job:` lines follow the preflight JSON, the first time you'll have seen them;
+- `"note": "already current"`;
+- the `sync-timers.sh` table ends `timers match active_jobs`;
+- `plan` prints `pending_removed_for_inactive_jobs`;
+- watchdog `"summary": "ok"`.
+
+If any of these is missing, stop and send me the full output.
+
+---
+
+## Part W — Upgrade to v0.5.4 (done 30 Oct)
 
 **What it fixes** (DESIGN §0.7 has the full account of 27–30 Oct):
 - History is fetched **only for mapped fixtures**. Nothing is fetched before A11.
@@ -799,13 +852,20 @@ Every command here is a by-hand run (v0.5.3): each gets its own `by hand` slot a
    sudo /opt/corners/app/deploy/run.sh map-load-teams $SHA review/team_map_v1.csv
    sudo /opt/corners/app/deploy/run.sh map-apply
    ```
-5. **Backfill** history (free) and exploration-season outcomes. Repeat each until it reports nothing left. From v0.5.4, `op-backfill` asks only for mapped fixtures, settles each 404 as `no_history`, and prints `usable`, `no_history`, `rate_limited` and `failed`:
+5. **Backfill** history (free) and exploration-season outcomes. The history backfill takes about an hour per 600 fixtures, at 6 s each. Run it inside `tmux`, so a dropped SSH session doesn't kill it halfway (that would leave a by-hand slot stuck as `running`):
    ```bash
-   sudo /opt/corners/app/deploy/run.sh op-backfill --max 600
-   sudo /opt/corners/app/deploy/run.sh af-backfill --max 1500
+   tmux new -s backfill
+   sudo /opt/corners/app/deploy/run.sh op-backfill --max 600     # repeat until "requested": 0
+   sudo /opt/corners/app/deploy/run.sh af-backfill --max 1500    # repeat until it reports nothing left
    ```
-6. **Activate the OddsPapi jobs**, only after I've answered the W4 probe. In your clone, edit `config/production.toml` to read
-   `active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]`. Then commit, push and deploy:
+   Detach with `Ctrl-b d` and reattach later with `tmux attach -t backfill`.
+   - `op-backfill` (v0.5.4 and later) asks only for mapped fixtures, settles each 404 as `no_history`, and prints `usable`, `no_history`, `rate_limited` and `failed`. Expect `no_history` for the fixtures of 1–4 January (about 60) and `usable` from mid-January.
+   - If `rate_limited` or `failed` keeps appearing, stop and send me the output.
+6. **Activate the OddsPapi jobs** (the W4 probe is answered: DESIGN §6.1). In your clone, edit `config/production.toml`:
+   - set `active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]`;
+   - replace the comment above it that says op_history "does nothing until mappings exist" with `# op_history fetches mapped fixtures only (v0.5.4).`
+
+   Then commit, push and deploy:
    ```bash
    cd ~/corner-fresh && git commit -am "activate op_account, op_fixtures and op_history" && git push
    sudo bash /opt/corners/repo/deploy/release.sh main      # the timer table shows the three op timers enabled, active, yes

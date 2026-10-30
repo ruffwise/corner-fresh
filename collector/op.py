@@ -195,7 +195,7 @@ class OP:
     def _history_params(self, fid: str) -> dict:
         return {"fixtureId": fid, "bookmakers": self.cfg.op_bookmakers}
 
-    def history_due(self, t: int) -> list[str]:
+    def history_due(self, t: int, limit: int | None = None) -> list[str]:
         """MAPPED fixtures only (a live, non-revoked provider_fixture_map row): history for
         a fixture we can't join to an api-football fixture and outcome is unusable, so it
         is never fetched. Due once the start is op_history_delay_h old, while there is no
@@ -223,7 +223,7 @@ class OP:
             " ORDER BY l.start_ms LIMIT ?",
             (PROVIDER, PROVIDER, PROVIDER, self.cfg.op_bookmakers, cutoff, HISTORY_FROM_MS,
              self.cfg.op_history_404_max, recheck, PROVIDER, self.cfg.op_bookmakers,
-             self.cfg.op_history_max_per_run)).fetchall()
+             self.cfg.op_history_max_per_run if limit is None else limit)).fetchall()
         return [r[0] for r in rows]
 
     def history_one(self, slot: Slot, fid: str, basis: str) -> str:

@@ -327,9 +327,9 @@ def dispatch(cfg, con, fetcher, slot, a):
         return op.history_probe(slot, [int(x) for x in a.tournaments.split(",") if x], a.year, months,
                                 a.control or None, now_ms())
     if a.cmd == "op-backfill":
-        ids = op.history_due(now_ms())
-        ids = ids[: a.max]
-        return op.history(slot, ids=ids)
+        # --max is the real cap for a by-hand backfill (the scheduled job's 60-per-run cap
+        # doesn't apply here): 600 fixtures at 6 s pacing is about an hour.
+        return op.history(slot, ids=op.history_due(now_ms(), limit=a.max))
     if a.cmd == "op-check-fixture":
         res = op.history(slot, ids=[a.fixture_id])
         if not res["usable"]:
