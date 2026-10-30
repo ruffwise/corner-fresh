@@ -25,7 +25,19 @@ git -C "$REPO" fetch --quiet --tags origin
 SHA=$(git -C "$REPO" rev-parse --verify --quiet "origin/$REF^{commit}" || git -C "$REPO" rev-parse --verify "$REF^{commit}")
 SHORT=${SHA:0:12}
 REL=$BASE/releases/$SHORT
-echo "== release $SHORT ($REF)"
+
+# 0. Always run the LATEST release.sh (origin/main), never the copy in the clone's
+#    working tree: `git fetch` doesn't update that file, so it silently goes stale
+#    (it did: v0.5.2 to v0.5.4 were deployed by the b9c09f6 script). origin/main, not
+#    the target commit, so a rollback to old code still runs current deploy logic.
+SCRIPT_SHA=$(git -C "$REPO" rev-parse --verify origin/main)
+if [ -z "${CORNERS_RELEASE_SCRIPT:-}" ]; then
+  LATEST=$(mktemp /tmp/corners-release.XXXXXX.sh)
+  git -C "$REPO" show "$SCRIPT_SHA:deploy/release.sh" > "$LATEST"
+  CORNERS_RELEASE_SCRIPT=$SCRIPT_SHA exec bash "$LATEST" "$@"
+fi
+case "$0" in /tmp/corners-release.*.sh) rm -f "$0" ;; esac      # bash keeps reading the open file
+echo "== release $SHORT ($REF), deploy script from ${CORNERS_RELEASE_SCRIPT:0:12} (origin/main)"
 
 # 1. Build the release directory (idempotent).
 if [ ! -d "$REL" ]; then

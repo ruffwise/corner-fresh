@@ -1,4 +1,4 @@
-# Pinnacle-Close Benchmark Study — Design v0.5.4
+# Pinnacle-Close Benchmark Study — Design v0.5.5
 
 **Status.** Draft for review. Supersedes v0.4. When accepted, commit it as part of `prereg-0`, then sign and timestamp it (§13).
 **Date.** 2026-10-30.
@@ -8,7 +8,8 @@
 - `db/schema.sql` (v4 base), `db/migrations/005_v05.sql` (to v5) and `db/connect.py`
 - `db/migrations/006_v051.sql` (to v6) and `007_v054.sql` (to v7: settled `no_history` outcomes)
 - `collector/` and `deploy/`, plus `RUNBOOK.md` (v0.5.4)
-- `tests/`: 264 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
+- `analysis/prereg_tests.py`: the two confirmatory tests of §1, for any number of outcomes
+- `tests/`: 273 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
 - `analysis/power.py` and its output `analysis/power_output.md`
 
 Every number in this document comes from `analysis/power.py` unless a source is cited.
@@ -19,12 +20,18 @@ Every number in this document comes from `analysis/power.py` unless a source is 
 
 ## 0. Status, and what changed in v0.5 to v0.5.4
 
-**Status (30 Oct).**
+**Status (30 Oct, afternoon).**
+- v0.5.4 deployed (live 2f969b5, schema v7; backup `…-pre-migrate-v6.db.gz`, restore test ok). `sync-timers.sh` run on its own: all six timers match `active_jobs`.
+- **The history window is January to now** (W4 probe, §6.1): 17 of 17 probed fixtures returned usable history, from 16 Jan to 17 Oct, plus the control; 1–4 Jan return 404. Not a rolling window.
+- W3 confirmed §0.7: 1,380 failed requests for 60 fixtures dated 1–4 Jan, each 404 at attempts 1, 2 and 3.
+- W7: UEFA round names checked; the qualifier rule holds (§9.1).
+
+**Status (30 Oct, morning).**
 - v0.5.3 deployed; by-hand runs verified (own slot, no healthchecks event); `raw_vs_requests` balanced.
 - A8 done (auto-shutdown off, 2 GB swap). A10 done: OddsPapi tournament ids committed (EPL 17, Championship 18, UCL 7, La Liga 8, Serie A 23, Bundesliga 35, Ligue 1 34, UEL 679, the same ids for 2025); 4,193 candidates listed, none mapped yet (A11 pending); the month histogram starts at 2026-01 in every tournament.
 - Quota: provider count 19 = 9 earlier manual probes + 2 catalog + 8 listings; our own count 10. The 4,140 history calls of 27–30 Oct did not move the provider count, consistent with history being free (§2 F2).
 - Personal-endpoint redaction confirmed live: `field:` rules fired only on api-football `/status` and OddsPapi `/v4/account`; 0 alerts.
-- **op_history is paused** (removed from `active_jobs`, timer disabled) after the 27–30 Oct incident (§0.7). The real history window is unverified until the probe in RUNBOOK W4 (§6.1).
+- **op_history is paused** (removed from `active_jobs`, timer disabled) after the 27–30 Oct incident (§0.7). It returns at RUNBOOK A11 step 6.
 
 **Earlier status (26 Oct).** api-football capture has been running since 25 Oct on your Azure VM, now at schema v6 (hotfix v0.5.1):
 - 5,628 fixtures tracked across 16 league-seasons; 76 outcomes;
@@ -65,6 +72,15 @@ OddsPapi steps (A10–A11) follow the v0.5.3 deploy.
 | C20 | **`op-history-probe`:** one finished fixture per month and tournament, plus a known-good control, to establish the real history window (RUNBOOK W4) | — |
 | C21 | **`deploy/sync-timers.sh`:** reconciles timers with `active_jobs` with every `systemctl` call reading `/dev/null`, then verifies from systemd's own state and fails loudly on any mismatch. `release.sh` calls it | v0.5.2's `while read` loop in `release.sh`, which could lose the rest of the job list (§0.7) |
 | C22 | **Pre-registration amendments (30 Oct, before any data):** main lines are half lines only (§0.2 item 6); explicit confirmatory families and exclusions (§9.1); UEFA qualifiers excluded (§9.1); G0.1 window (§11); integrity without branch protection (§13) | §0.2 item 6 as confirmed on 26 Oct |
+
+**v0.5.5 changes** (no schema change):
+
+| # | Change | Supersedes |
+|---|---|---|
+| C23 | **`release.sh` always runs the latest deploy script** (from `origin/main`), and says which. The copy in the server clone's working tree had gone stale: `git fetch` never updates it, so v0.5.2, v0.5.3 and v0.5.4 were all deployed by the b9c09f6 script (§0.7) | Every `release.sh` since b9c09f6 |
+| C24 | **`op-backfill --max` is the real cap** (it was silently limited to the hourly job's 60) | v0.5 `op-backfill` |
+| C25 | **The confirmatory tests for any K** (`analysis/prereg_tests.py`), with 1X2 scored on all three outcomes (§1) | §1's binary-only wording |
+| C26 | **G0.5a treatment of settled no_history** (§6) and the measured start of history (`eligibility.history_window_start_ms`) | — |
 
 **v0.5 changes.** Each supersedes the section named.
 
@@ -185,7 +201,7 @@ The literal final-window mean and CI are still reported alongside.
 
 ### 0.5 Scheduled jobs and alerting (C8)
 
-- `active_jobs` in `config/production.toml` is the one list. Today: `af_fixtures`, `af_odds`, `af_results`, `op_history`. `op_account` and `op_fixtures` join at RUNBOOK A11.
+- `active_jobs` in `config/production.toml` is the one list. Today (30 Oct): `af_fixtures`, `af_odds`, `af_results`. `op_account`, `op_fixtures` and `op_history` join at RUNBOOK A11 step 6.
 - `plan` creates slots only for active jobs and deletes **pending** slots of inactive ones. Pending slots have no requests, so nothing observed is lost; claimed, complete, failed and missed slots are never touched.
 - Only systemd timer runs (`CORNERS_TRIGGER=timer`) claim planned slots and ping healthchecks. Every `run.sh` run gets a new slot noted `by hand`, never on a planned slot's timestamp, and sends no ping (v0.5.3).
 - `watchdog` marks misses only for active jobs. It also reports a timer that fired for an inactive job.
@@ -210,7 +226,8 @@ The literal final-window mean and CI are still reported alongside.
 - **Why it ran at all:** `history_due` selected every listed candidate, mapped or not. The config comment "does nothing until mappings exist" was wrong: it did nothing only while there were no candidates. My error.
 - **Why the same fixtures every hour:** it takes the 60 oldest due fixtures (2026-01-01 to 01-04), and a failed request left them due. 1,380 requests = 23 runs × 60. 4,140 responses = 1,380 × 3, because each 404 was retried 3 times at 6 s pacing (the 18 minutes).
 - **Why every slot failed:** one failed request failed the slot, and a 404 was treated as a failure.
-- **Why `release.sh` didn't disable the timer** after `op_history` left `active_jobs`: v0.5.2 read the job list with `while read … done <<< "$JOBS"`. Any command in the loop that reads standard input consumes the rest of the list silently. I reproduced exactly this symptom (the job list processed for the first job only, `op-history` left enabled, exit 0) with a `systemctl` that reads its input. I can't prove that is what happened on the VM. v0.5.4 removes the possibility and verifies the end state (C21).
+- **Why `release.sh` didn't disable the timer** after `op_history` left `active_jobs` (corrected 30 Oct). The timer step never ran. `release.sh` is run from the server clone's working tree (`/opt/corners/repo/deploy/release.sh`), and `release.sh` only `git fetch`es, which updates the objects but never that file. So every deploy since b9c09f6, including v0.5.2, v0.5.3 and v0.5.4, ran the b9c09f6 script. That script has no job list, no timer step, no `plan` post-check and no `sync-timers.sh` call. The evidence is the release output: no `job:` lines, no `plan` output, no timer table (28 and 30 Oct). My first explanation, the `while read` loop losing its input, described a real fragility in a loop the VM never ran; v0.5.4 removed it anyway. v0.5.5 makes `release.sh` re-execute itself from `origin/main` (C23).
+- **What else the stale script skipped since 26 Oct:** the `af_odds` preflight guard, the timer reconciliation (you managed the timers by hand, and W2's standalone `sync-timers.sh` shows them correct now), and the post-deploy `plan` (the hourly plan timer did it at the next :00). Unit files were installed, because that step predates b9c09f6: `CORNERS_TRIGGER=timer` is live, as V3 showed. Nothing collected was affected.
 
 **Effect on data: none harmful.** The failed rows stay in the raw layer as evidence. They are `usable = 0`, so nothing parses them; nothing in G0.5, the close or analysis reads them; they cost about the size of 4,140 small error bodies in the archive and its off-box copy. They didn't count against the OddsPapi quota. The one consequence is the ledger: 22 failed `op_history` slots. G0.1 counts from the v0.5.4 deploy (§11), and this incident is the explanation on record.
 
@@ -219,8 +236,10 @@ The literal final-window mean and CI are still reported alongside.
 ## 1. What counts as success
 
 > **Success:** out of sample, on fixtures frozen after pre-registration, a pre-registered rule's forecasts carry information the de-vigged Pinnacle close does not. Two tests must both pass:
-> 1. **Encompassing:** in `y ~ offset(logit c) + b·(logit m − logit c)`, b > 0 by a one-sided likelihood-ratio test.
-> 2. **Scoring rule:** the mean log loss of the forecast m is lower than that of the close c, by a one-sided paired test.
+> 1. **Encompassing:** in the pooled forecast p_k(b) ∝ c_k^(1−b) · m_k^b over the K outcomes, b > 0 by a one-sided likelihood-ratio test (signed root of the LR statistic; p = 1 − Φ(z)).
+> 2. **Scoring rule:** the mean log loss of the forecast m, −log m_y, is lower than that of the close c, −log c_y, by a one-sided paired t-test on the per-fixture differences.
+>
+> For K = 2, test 1 is exactly `y ~ offset(logit c) + b·(logit m − logit c)`. **1X2 is scored on all three outcomes (K = 3)**, never on one named side: picking a side after exploration would be a researcher choice. Fixed 30 Oct, before any data; code and tests in `analysis/prereg_tests.py`.
 >
 > Both use Holm correction at the cap of 6 rules (§9).
 
@@ -239,7 +258,7 @@ The literal final-window mean and CI are still reported alongside.
 | F1 | api-football pre-match odds: kept 7 days, appear 1–14 days before kickoff, refreshed every 3 hours, `/odds` returns 10 fixtures per page | Documented | api-football beginner's guide |
 | F2 | OddsPapi `/v4/historical-odds` is "always free" and never increments the request count. `/v4/account` is always accessible, even after the quota runs out. `/v4/fixtures`, `/v4/tournaments` and `/v4/markets` cost 1 each | Documented | OddsPapi "Requests & Quota" |
 | F3 | The same page says the free quota "resets on the 1st day of each month". Your account shows `request_limit: 250` with no renewal date | **Conflict** | Treated as possibly lifetime until confirmed (§3) |
-| F4 | History is available since January 2026. Records carry `createdAt`, `price`, `limit` and `active`. The call returns at most 3 bookmakers, has a 5 s cooldown, and finished fixtures return an ETag | Documented | OddsPapi "GET historical-odds" |
+| F4 | History is available **from at least 16 Jan 2026**; fixtures on 1–4 Jan return 404 (the boundary lies between 4 and 16 Jan). Not a rolling window: fixtures from January to October return history. The docs say "since January 2026". Records carry `createdAt`, `price`, `limit` and `active`. The call returns at most 3 bookmakers, has a 5 s cooldown, and finished fixtures return an ETag | Documented; **window measured 30 Oct** | OddsPapi "GET historical-odds"; RUNBOOK W4 probe (17 of 17 usable, 16 Jan to 17 Oct) and W3 (1,380 requests for 60 fixtures dated 1–4 Jan, all 404) |
 | F5 | `/v4/fixtures` with `tournamentId` makes `from`/`to` optional. Its 2 s cooldown applies, and each fixture carries `fixtureId`, participant ids and names, `startTime`, `statusId` and external ids | Documented | OddsPapi "GET fixtures" |
 | F6 | OddsPapi has a v5 historical endpoint with a `changedAt` field per record | Documented | OddsPapi v5 docs. Not used yet, because you specified v4. Worth one look on day 1 if v4's `createdAt` turns out to be a poll time |
 | F7 | api-football lists exactly one bookmaker named `Pinnacle`, id 4 (was U1) | **Resolved 25 Oct** | `af-bootstrap` PASS on your VM |
@@ -356,24 +375,16 @@ A test asserts that no `sb_` table exists, and that a bookmaker cannot be given 
 
 **The closing price:** rule close-v1 (§0.2). `v_close` was removed in schema v5. Exploration on history and forward confirmation call the same function (`collector/close.py`), and the schema re-checks every stored close.
 
-### 6.1 If the history window is shorter than documented
+### 6.1 The history window (measured 30 Oct)
 
-The docs say "all historical odds data since January 2026 is available". On 27–30 Oct every request for 1–4 January fixtures returned 404, while an October fixture (Arsenal v Leeds) returns history. The W4 probe asks one fixture per month, January to October. Until it reports, nothing is built on the January assumption. What a shorter window changes:
+**Result.** The W4 probe asked one finished fixture per month, January to October 2026, in the EPL and La Liga (UCL qualifiers for July; nothing to ask in June), plus a known-good control. All 17 returned usable history, from 16 Jan to 17 Oct. The 27–30 Oct failures were all for fixtures dated 1–4 Jan (W3). History is therefore available from at least 16 Jan, the boundary lies between 4 and 16 Jan, and the window doesn't roll.
 
-- **Confirmation: nothing in principle.** It uses forward fixtures only (above). The one new risk is a rolling window: history must then be fetched while it is still retained, so `op_history` must run continuously from A11, and any pause like 27–30 Oct loses fixtures. The 3-hour delay already fetches promptly.
-- **Exploration shrinks.** About 57 usable fixtures per in-season week (1,700 over about 30 weeks). The smallest effect exploration can reveal scales with 1/√n (approximation from `power.py`'s 4.2pp at 1,700):
+**Consequence: the January case applies.** Exploration runs on history from the first available day, about 1,700 fixtures, revealing effects of √r·τ ≥ 4.2pp (§8). The shorter-window alternatives considered before the probe are dropped. Nothing in confirmation changes.
 
-| History starts | Exploration fixtures (approx.) | Smallest detectable √r·τ |
-|---|---|---|
-| January (as documented) | 1,700 | 4.2pp |
-| March | 1,300 | 4.8pp |
-| May | 800 | 6.1pp |
-| August | 570 | 7.3pp |
-| Rolling 30 days | 230 | 11.4pp |
-
-- **If history starts in May or later**, exploration on vendor history can only reveal effects I consider implausible for these markets (≥ 6pp). It then can't usefully choose rules. The alternative is to take exploration from forward data: the first weeks of forward collection become the exploration sample, and confirmation runs on the rest. That costs confirmation sample inside the one-season cut-off (§10): with 10 weeks of exploration, confirmation gets about 1,900 fixtures, and the smallest detectable effect rises from 3.4pp to about 4.0pp. The stop rules don't change; X3 then applies to forward exploration.
-- **The power table in §8 is unaffected**: it concerns confirmation.
-- Whichever case the probe shows, the change is written here and confirmed by you before `prereg-0`, and before any exploration result exists.
+**Rules that follow** (fixed before any G0.5 or exploration data):
+- The first available history day is **measured**, not assumed: the earliest fixture start with a usable history response (`eligibility.history_window_start_ms`).
+- Exploration fixtures before that day are excluded from exploration and from G0.5a, and reported as a count.
+- `op-backfill` asks for every mapped fixture from 1 Jan; the 1–4 Jan fixtures settle as `no_history` (one recheck after 24 h, then terminal). That costs about 120 free calls.
 
 ### G0.5 for the OddsPapi close (pre-registered)
 
@@ -382,6 +393,11 @@ The docs say "all historical odds data since January 2026 is available". On 27�
 - (b) every side of the main line (§0.2 item 6) has a close under close-v1 (an active record in force at the cutoff);
 - (c) the mapping is live and unaudited-or-agreeing;
 - (d) the fixture has at least 2 start sources (§0.2 item 7). Fixtures with fewer are reported and not counted, subject to the 80% floor.
+
+**Settled `no_history` in the G0.5a denominator** (`eligibility.g05a_history_status`, fixed 30 Oct, before any G0.5 data):
+- a **forward** fixture, or any fixture on or after the first available history day, with a settled `no_history` stays **in** the denominator as **unusable**, so vendor gaps can't hide behind settled 404s;
+- a fixture **before** the first available history day is excluded from G0.5a and reported;
+- a fixture not yet asked or answered is pending: not counted until settled.
 
 **The source passes G0.5 when all three hold:**
 - (a) **G0.5a:** ≥ 80% of mapped fixtures with ≥ 2 start sources are usable, per family, under close-v1 (or close-v2 for a family switched by the rule in §0.2 item 8); and ≥ 80% of finished mapped fixtures have ≥ 2 start sources;
@@ -495,7 +511,9 @@ From `power_output.md` §13.
 | `totals-corners:fulltime` | 10787–10809 | half line nearest 50/50 |
 | `spreads-corners:fulltime` | 10859–10881 | half line nearest 50/50 |
 
-Each confirmatory rule (at most 6 for the project) picks one of these families at `prereg-1`. How a 3-way market is scored (multinomial log loss, or one pre-named side) is part of the rule. Corners are in because their outcomes are collected and their Pinnacle limits are lower, which is where an inefficient close is most plausible.
+Each confirmatory rule (at most 6 for the project) picks one of these families at `prereg-1`. **1X2 is scored on all three outcomes** with the K = 3 form of both tests (§1), fixed now rather than at `prereg-1`. Corners are in because their outcomes are collected and their Pinnacle limits are lower, which is where an inefficient close is most plausible.
+
+**Asian handicap and 1X2 overlap.** When the Asian-handicap main half line is ±0.5, it is a function of the 1X2 outcome: home −0.5 wins exactly when the home side wins, and home +0.5 wins on a home win or a draw. In those fixtures the two families aren't independent tests. Holm stays valid under any dependence, so the error rate is protected. But a rule on each family is then not two pieces of evidence, and results are reported with the share of fixtures whose AH main line was ±0.5.
 
 **Excluded families, with reasons** (`close.family_eligibility`; any family not listed is excluded by default):
 
@@ -509,7 +527,7 @@ Each confirmatory rule (at most 6 for the project) picks one of these families a
 | Team totals (goals and corners) | Redundant with match totals and handicaps |
 | Double chance, draw no bet, win to nil, to score, odd/even | Derived from or redundant with 1X2, BTTS or totals; odd/even carries no plausible information |
 
-**UEFA qualifiers don't count** (`collector/eligibility.py`). For the Champions League (2) and Europa League (3), a fixture counts only if it kicks off on or after the first kickoff of a round named `League Stage…` in that league-season. The rule keys on the main competition's start rather than on qualifying-round names, so February's `Knockout Round Play-offs` count and August's `Play-offs` don't. Reasons: qualifiers bring many teams outside the team map (mis-join risk), thin Pinnacle markets, and a different competitive context. RUNBOOK W7 checks the round names on the VM before `prereg-0`.
+**UEFA qualifiers don't count** (`collector/eligibility.py`). For the Champions League (2) and Europa League (3), a fixture counts only if it kicks off on or after the first kickoff of a round named `League Stage…` in that league-season. The rule keys on the main competition's start rather than on qualifying-round names, so every later round counts whatever it is called, and August's `Play-offs` don't. Reasons: qualifiers bring many teams outside the team map (mis-join risk), thin Pinnacle markets, and a different competitive context. **Checked on the VM 30 Oct (W7):** both leagues, 2025 and 2026, use `1st/2nd/3rd Qualifying Round`, `Play-offs`, `League Stage - 1` to `- 8`, then `Round of 32` (17 and 19 Feb 2026), `Round of 16`, `Quarter-finals`, `Semi-finals` and `Final`. The test uses these names.
 
 ---
 
@@ -578,7 +596,7 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 | P13 | api-football lists exactly one bookmaker named `Pinnacle`. Weak prior | It doesn't. **Resolved 25 Oct: held** (id 4) |
 | P14 | OddsPapi Pinnacle history passes G0.5a and G0.5b for EPL fixtures | Either gate fails for EPL |
 | P15 | `createdAt` is a change-capture time, and G0.5c passes | G0.5c < 95% |
-| P16 | A `tournamentId` listing without `from` does **not** reach back to January | Months before August appear |
+| P16 | A `tournamentId` listing without `from` does **not** reach back to January | Months before August appear. **Not tested (30 Oct):** the 27 Oct listing passed the one-off `from = 2026-01-01`, so its reaching January says nothing about a listing without `from`. The question is moot: the one-off `from` listing found the history candidates. Closed as untested, not as held or falsified |
 | P17 | Exploration produces no candidate meeting X3 for top-league 1X2 or goals O/U | One does |
 | P18 | No confirmatory rule passes G2.1 within one season | One does |
 
@@ -615,7 +633,8 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 | v0.5.1 hotfix: endpoint-scoped redaction, damage repair (schema v6) | **Done**; deployed and repaired 25 Oct |
 | v0.5.2: active jobs, named watchdog failures, timer drift guard; off-box copy and backup status; close-v1b, main-line rule, start-source rule, L2 inspection gate; `close-report` | **Done**; deployed 26 Oct, off-box copy and restore drill verified |
 | v0.5.3: by-hand runs get their own slots and never ping; `raw_vs_requests` in the report | **Done**; deployed 27 Oct |
-| v0.5.4: mapped-only history, settled 404s, 429 back-off, history health alert, probe, verified timer sync, family eligibility, UEFA stage rule (schema v7) | **Done.** Deploy with RUNBOOK Part W |
+| v0.5.4: mapped-only history, settled 404s, 429 back-off, history health alert, probe, verified timer sync, family eligibility, UEFA stage rule (schema v7) | **Done**; deployed 30 Oct |
+| v0.5.5: `release.sh` runs the latest script; `op-backfill --max`; K-outcome confirmatory tests; G0.5a no_history rule | **Done.** Deploy with RUNBOOK Part X |
 | Mapping tooling (propose, load from git, apply, kickoff audit, manual sample) | **Done** |
 | M6: parsers into `quote` and `price_history` with allowlists from the day-1 dumps; `price_agreement` audit | Next. Needs the day-1 dumps |
 | M7: G0.5 report, coverage ledger job, de-vig oracle test (R13), training-cutoff guard (R14) | After M6 |
@@ -636,13 +655,16 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 
 - Confirmed for `prereg-0`: the 2% L2 flag cap and the four causes (§0.3); close-v1b and its switching rule (§0.2 item 8); the 80% floor on fixtures with ≥ 2 start sources (item 7); the main-line rule at cutoff − 60 min, with Over as the look-ahead selection (item 6).
 
-**Open (fixed in this draft; confirm or change before `prereg-0`):**
-1. Main lines restricted to half lines (§0.2 item 6), an amendment to what you confirmed on 26 Oct.
-2. The six confirmatory families and the exclusion list (§9.1).
-3. UEFA qualifiers excluded by the main-stage rule (§9.1).
-4. G0.1 counted from the v0.5.4 deploy, per job (§11).
-5. A history 404 is re-asked once after 24 h before it is terminal (§0 C17). You asked for terminal at once; I recommend one recheck, because if a 404 can mean "not ready yet" for a fresh fixture, terminal-at-once would lose forward fixtures permanently. `history_404_max = 1` gives your version.
-6. After the W4 probe: what the real history window means for exploration (§6.1).
+**Decided on 30 Oct:**
+- Main lines are half lines only (§0.2 item 6), with the AH ±0.5 / 1X2 overlap stated (§9.1).
+- The six confirmatory families and the exclusion list (§9.1); 1X2 scored on all three outcomes with the K = 3 tests (§1).
+- UEFA qualifiers excluded by the League Stage date rule (§9.1).
+- G0.1 counted per job from the v0.5.4 deploy (§11).
+- A history 404 is re-asked once after 24 h, then terminal (§0 C17).
+- History window: January to now; the January case applies (§6.1).
+- Settled `no_history` in G0.5a: unusable in the denominator from the first available history day; excluded and reported before it (§6).
+
+**Open:** none in the design. Still to come from you: W6 (the quota reading after 00:00 UTC 1 Nov) and the A8 memory peaks once op_history runs again.
 
 ---
 

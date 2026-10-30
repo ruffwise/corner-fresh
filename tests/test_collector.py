@@ -1027,15 +1027,15 @@ def test_watchdog_alerts_when_forward_fixtures_have_no_history(env, monkeypatch,
     assert "no_history on 100% of 12 requests" in capsys.readouterr().out
 
 
-def test_uefa_qualifiers_do_not_count_but_knockout_playoffs_do(env):
+def test_uefa_qualifiers_do_not_count_but_the_round_of_32_does(env):
     from collector import eligibility
     cfg, con, fake, f = env
     con.execute("INSERT INTO league VALUES (2, 2026, 'UEFA Champions League', 'World', 'Cup')")
     d = lambda s: close.iso_ms(s)  # noqa: E731
     fx = [af_fixture(1, d("2026-08-19T19:00:00Z"), league=2, round_="Play-offs", home=(1, "A"), away=(2, "B")),
           af_fixture(2, d("2026-09-16T19:00:00Z"), league=2, round_="League Stage - 1", home=(3, "C"), away=(4, "D")),
-          af_fixture(3, d("2027-02-17T20:00:00Z"), league=2, round_="Knockout Round Play-offs", home=(5, "E"),
-                     away=(6, "F"))]
+          af_fixture(3, d("2027-02-16T20:00:00Z"), league=2, round_="Round of 32", home=(5, "E"),
+                     away=(6, "F"))]   # api-football's real names (W7, 30 Oct)
     fake.add("/fixtures", {"league": 2, "season": 2026}, (200, af_page(fx)))
     fake.add("/leagues", {"id": 2, "season": 2026}, (200, af_page([{"league": {"id": 2, "name": "UCL", "type": "Cup"},
                                                                       "country": {"name": "World"}}])))
@@ -1054,3 +1054,30 @@ def test_probe_output_is_printed_even_if_the_slot_fails(env, monkeypatch, capsys
     rc = main(cli(env) + ["op-history-probe", "--months", "1", "--control", "ctl"])
     cap = capsys.readouterr()
     assert rc == 1 and '"rate_limited"' in cap.out and "SlotIncomplete" in cap.err
+
+
+def test_op_backfill_honours_max_beyond_the_hourly_cap(env, tmp_path, monkeypatch):
+    import dataclasses
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
+    op.cfg = dataclasses.replace(cfg, op_history_max_per_run=0)       # the scheduled cap would take none
+    assert op.history_due(now_ms()) == [] and op.history_due(now_ms(), limit=600) == ["idA"]
+
+
+def test_g05a_history_status_rules():
+    from collector.eligibility import g05a_history_status as g
+    w = 1000
+    assert g(2000, True, False, w) == "counted"
+    assert g(2000, False, True, w) == "unusable"           # forward gap stays in the denominator
+    assert g(500, False, True, w) == "out_of_window"        # before the first available day: excluded, reported
+    assert g(2000, False, False, w) == "pending"
+
+
+def test_history_window_start_is_measured(env, tmp_path):
+    from collector.eligibility import history_window_start_ms
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
+    assert history_window_start_ms(con) is None
+    fake.add(*HIST, (200, {"fixtureId": "idA", "bookmakers": {}}))
+    run(con, "op_history", lambda s: op.history(s))
+    assert history_window_start_ms(con) == close.iso_ms("2026-10-10T16:30:00Z")
