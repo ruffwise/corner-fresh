@@ -1,14 +1,115 @@
-# Runbook v0.5.3
+# Runbook v0.5.4
 
-**Part V** upgrades v0.5.2 to v0.5.3 (by-hand runs). Do it next, then A8, A10 and A11.
-**Done:** Part U (v0.5.2 and the off-box copy, 26 Oct), Part A-H (the v0.5.1 hotfix), and Part A up to A9 and A7.
+**Part W** upgrades v0.5.3 to v0.5.4 (op_history fixes, verified timer sync, history-window probe). Do it next, then A11.
+**Done:** Part V (v0.5.3, 27 Oct), Part U (v0.5.2 and the off-box copy, 26 Oct), Part A-H (the v0.5.1 hotfix), and Part A up to A10.
 **Part B** is a fresh install, for reference.
 
 Run all commands on the VM unless a step says otherwise. Replace `OWNER` with your GitHub user or organisation.
 
 ---
 
-## Part V — Upgrade to v0.5.3 (do this next)
+## Part W — Upgrade to v0.5.4 (do this next)
+
+**What it fixes** (DESIGN §0.7 has the full account of 27–30 Oct):
+- History is fetched **only for mapped fixtures**. Nothing is fetched before A11.
+- A history **404 is an answer**: not retried, recorded as `no_history`, the slot still completes, asked once more after 24 h, then final.
+- **429**: backs off (12 s, then 24 s); after 2 consecutive rate-limited fixtures the run stops and the rest wait for the next run. 429, 5xx and network failures still fail the slot, because those are real faults.
+- The report gains `op_history`. The watchdog fails if more than half of ≥ 10 requests for fixtures from the last 7 days get `no_history`, so a vendor change can't hide behind settled 404s.
+- `deploy/sync-timers.sh` makes timers match `active_jobs`, then checks systemd's actual state and stops with `TIMER STATE MISMATCH` if anything differs. `release.sh` uses it. You can also run it on its own.
+- Schema v7 adds `request_outcome`, which is append-only and accepts `no_history` only for a recorded 404 with no usable response.
+
+`op_history` stays out of `active_jobs` until A11 step 6.
+
+### W1. Merge the commit into your clone and push (as `azureuser`)
+
+Your `main` has your three config commits (9ae7948, 66cafc5, 7951055) on top of 96e2bde. v0.5.4 is built on 96e2bde and **doesn't touch `config/production.toml`**, so it merges cleanly. This is a merge, not a fast-forward:
+
+```bash
+scp corner-fresh-v054.bundle azureuser@<vm>:~/          # from your PC
+cd ~/corner-fresh
+git fetch ~/corner-fresh-v054.bundle main
+git merge --no-edit FETCH_HEAD          # expect "Merge made by the 'ort' strategy"; no conflicts
+git log --oneline --graph | head -8
+git push
+```
+
+If git reports a conflict, run `git merge --abort` and send me the output.
+
+### W2. Deploy
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh main
+```
+
+**Expected:**
+- the backup path ends `-pre-migrate-v6.db.gz`, `backup_restore_test` is `ok`, and `migrated` is `[7]`;
+- the timer table from `sync-timers.sh` shows `corners-op-history.timer` as `inactive`, `disabled`, `inactive`, `yes`, and ends with `timers match active_jobs`;
+- watchdog `"summary": "ok"`.
+
+If the table ends with `TIMER STATE MISMATCH`, stop and send me the table.
+
+If you still have the terminal output of the 30 Oct `release.sh` run, send me its lines between `migrate` and `== live`. They would tell me whether the job-list loop stopped early.
+
+### W3. Confirm the 27–30 Oct pattern (read-only)
+
+```bash
+sudo -u corners sqlite3 -header -column /opt/corners/data/corners.db "
+SELECT count(*) AS failed_requests, count(DISTINCT a.params_canonical) AS fixtures,
+       min(datetime(c.s/1000,'unixepoch')) AS first_start, max(datetime(c.s/1000,'unixepoch')) AS last_start
+FROM api_request a
+LEFT JOIN (SELECT provider_fixture_id AS f, max(start_ms) AS s FROM provider_fixture_candidate GROUP BY 1) c
+  ON 'bookmakers=pinnacle&fixtureId=' || c.f = a.params_canonical
+WHERE a.endpoint = '/v4/historical-odds' AND a.status = 'failed';
+SELECT r.http_status, r.attempt, count(*) AS n FROM raw_response r JOIN api_request a USING (request_id)
+WHERE a.endpoint = '/v4/historical-odds' GROUP BY 1, 2 ORDER BY 1, 2;"
+```
+
+**Expected:** `fixtures` about 60 (the same oldest fixtures every run), dates 2026-01-01 to 01-04, and each 404 at attempts 1, 2 and 3. Send me both tables.
+
+### W4. Probe the real history window (free; about 3 minutes)
+
+```bash
+sudo /opt/corners/app/deploy/run.sh op-history-probe > ~/probe.json; echo "exit $?"
+python3 -c 'import json; r=json.load(open("/home/azureuser/probe.json")); print(json.dumps(r, indent=1))'
+```
+
+**What it does:**
+- First, the **control**: Arsenal v Leeds, known to return history. If the control fails, the endpoint itself has changed: stop and send me the output.
+- Then, for each month January–October 2026, one finished EPL (17) and one La Liga (8) fixture, the nearest after the 15th. A month with neither (June, July) falls back to any configured tournament.
+- About 21 calls at 6 s pacing. The endpoint is free, and no mapping is needed.
+
+Send me the `months` block. The `http_status` by month shows where history starts. Nothing is built on the history window until I've written its consequences into DESIGN §6.1 and you've confirmed them.
+
+### W5. History health in the report
+
+```bash
+sudo /opt/corners/app/deploy/run.sh report | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["op_history"], indent=2))'
+```
+
+After W4 this shows the probe's requests. `forward_requests_24h` stays 0 until A11, because the probe's fixtures are older than 7 days.
+
+### W6. Monthly or lifetime quota (1 Nov, after 00:00 UTC)
+
+```bash
+sudo /opt/corners/app/deploy/run.sh op-account
+```
+
+**What it tells you:** a `request_count` below 19 means the quota reset monthly; 19 means it didn't, so treat 250 as lifetime. Send me the two numbers.
+
+### W7. UEFA round names (read-only, for the qualifier rule)
+
+```bash
+sudo -u corners sqlite3 -header -column /opt/corners/data/corners.db "
+SELECT f.league_id, f.season, f.round, count(*) AS n, min(date(v.kickoff_ms/1000,'unixepoch')) AS first
+FROM fixture f JOIN v_fixture_latest v USING (fixture_id)
+WHERE f.league_id IN (2, 3) GROUP BY 1, 2, 3 ORDER BY 1, 2, first;"
+```
+
+The rule (DESIGN §9.1) needs a round that starts with `League Stage`. Send me the list. If the main stage is named differently, I'll change the rule before `prereg-0`.
+
+---
+
+## Part V — Upgrade to v0.5.3 (done 27 Oct)
 
 **What it fixes.** In v0.5.2, a by-hand `run.sh` run of an active job claimed that job's current planned slot. If the timer had already completed it, the run failed with `slot ... already complete` and sent a false `/fail` to healthchecks.
 
@@ -107,7 +208,7 @@ systemctl list-timers 'corners*' --no-pager
 
 **Expected:** `af-fixtures`, `af-odds`, `af-results`, `op-history`, `plan`, `watchdog`, `report` and `backup`. No `op-account` or `op-fixtures`.
 
-From now on, to start or stop a scheduled job, edit `active_jobs`, commit, push, and run `release.sh`. Don't run `systemctl enable` or `disable` by hand. The watchdog reports a timer that fires for a job outside the list.
+From now on, to start or stop a scheduled job, edit `active_jobs`, commit, push, and run `release.sh`. It runs `deploy/sync-timers.sh`, which reconciles the timers, verifies them and prints a table (v0.5.4). To re-sync without a release, run `sudo bash /opt/corners/app/deploy/sync-timers.sh`. Avoid `systemctl enable` or `disable` by hand. The watchdog reports a timer that fires for a job outside the list.
 
 ### U4. Measure the archive growth (one minute)
 
@@ -698,18 +799,18 @@ Every command here is a by-hand run (v0.5.3): each gets its own `by hand` slot a
    sudo /opt/corners/app/deploy/run.sh map-load-teams $SHA review/team_map_v1.csv
    sudo /opt/corners/app/deploy/run.sh map-apply
    ```
-5. **Backfill** history (free) and exploration-season outcomes. Repeat each until it reports nothing left:
+5. **Backfill** history (free) and exploration-season outcomes. Repeat each until it reports nothing left. From v0.5.4, `op-backfill` asks only for mapped fixtures, settles each 404 as `no_history`, and prints `usable`, `no_history`, `rate_limited` and `failed`:
    ```bash
    sudo /opt/corners/app/deploy/run.sh op-backfill --max 600
    sudo /opt/corners/app/deploy/run.sh af-backfill --max 1500
    ```
-6. **Activate the OddsPapi jobs.** In your clone, edit `config/production.toml` to read
+6. **Activate the OddsPapi jobs**, only after I've answered the W4 probe. In your clone, edit `config/production.toml` to read
    `active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]`. Then commit, push and deploy:
    ```bash
-   cd ~/corner-fresh && git commit -am "activate op_account and op_fixtures" && git push
-   sudo bash /opt/corners/repo/deploy/release.sh main      # prints: enabled corners-op-account.timer, ...op-fixtures.timer
+   cd ~/corner-fresh && git commit -am "activate op_account, op_fixtures and op_history" && git push
+   sudo bash /opt/corners/repo/deploy/release.sh main      # the timer table shows the three op timers enabled, active, yes
    ```
-   Then create `HC_OP_ACCOUNT` (`50 0 * * *`, grace 1 h) and `HC_OP_FIXTURES` (`55 0 * * *`, grace 1 h).
+   Then create `HC_OP_ACCOUNT` (`50 0 * * *`, grace 1 h) and `HC_OP_FIXTURES` (`55 0 * * *`, grace 1 h), and resume the paused `op_history` check.
 
 From now on, `op-fixtures` runs `map-apply` itself. It alerts (exit 4, healthchecks fail) when more than 10% of the next 72 hours' fixtures in a tournament are unmapped. It relists, within the quota guard, when OddsPapi hasn't listed them.
 
@@ -786,6 +887,9 @@ Until this step is done, CI fails one test, `test_every_endpoint_has_a_real_payl
 |---|---|---|
 | `QUOTA REFUSED` | The guard did its job: nothing billable was sent | Check `op-account`. Don't raise the budget without a written reason |
 | `op-fixtures` exit 4 / healthchecks fail | Unmapped share above 10% for the next 72 h | Read `unmapped_next_72h`. `candidate_unmapped` means review the team map; `no_candidate` means a relist was attempted |
+| `TIMER STATE MISMATCH` (release.sh or sync-timers.sh) | A timer's real state differs from `active_jobs` after reconciling | Read the table; fix the named timer, then re-run `sudo bash /opt/corners/app/deploy/sync-timers.sh` |
+| Watchdog: `op_history: no_history on N% of … requests` | Recent fixtures are getting 404 from OddsPapi history | Run W4's probe, and send me the output and the `op_history` report block |
+| `op-history` result `stopped_early_on_429: true` | OddsPapi rate-limited 2 fixtures in a row even after back-off | Nothing; the rest are due next run. If it repeats every run, tell me |
 | `slot <job>@<ms> already complete` | Only in v0.5.2: a by-hand run collided with a completed planned slot | Deploy v0.5.3 (Part V); by-hand runs then get their own slot |
 | A slot is `failed` | A request failed after retries | The raw attempts are in the archive; `report` shows which endpoint |
 | A slot is `missed` | VM down, or the timer didn't fire | `systemctl status corners@<job>` and `journalctl -u corners@<job>` |

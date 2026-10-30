@@ -87,21 +87,15 @@ done
 # 6b. Scheduled-job timers follow active_jobs in the committed config, so the planner,
 #     the watchdog and systemd can never disagree. Infrastructure timers (plan,
 #     watchdog, report, backup) are always on.
-if [ -n "$JOBS" ]; then
-while read -r job state; do
-  t=corners-${job//_/-}.timer
-  if [ "$state" = active ]; then
-    systemctl is-enabled --quiet "$t" && systemctl is-active --quiet "$t" || { systemctl enable --now "$t"; echo "   enabled $t"; }
-  else
-    if systemctl is-enabled --quiet "$t" || systemctl is-active --quiet "$t"; then systemctl disable --now "$t"; echo "   disabled $t (not in active_jobs)"; fi
-  fi
-done <<< "$JOBS"
+if [ -n "$JOBS" ] && [ -f "$REL/deploy/sync-timers.sh" ]; then
+  bash "$REL/deploy/sync-timers.sh" "$REL"          # reconciles, then verifies; exits non-zero on mismatch
 else
   echo "   this release has no active_jobs support (older code): scheduled-job timers left as they are"
+  for t in corners-plan.timer corners-watchdog.timer corners-report.timer corners-backup.timer; do
+    systemctl is-enabled --quiet "$t" </dev/null && systemctl is-active --quiet "$t" </dev/null \
+      || { systemctl enable --now "$t" </dev/null; echo "   enabled $t"; }
+  done
 fi
-for t in corners-plan.timer corners-watchdog.timer corners-report.timer corners-backup.timer; do
-  systemctl is-enabled --quiet "$t" && systemctl is-active --quiet "$t" || { systemctl enable --now "$t"; echo "   enabled $t"; }
-done
 
 # 7. Post-checks with the new code.
 run() { sudo -u corners bash -c "set -a; . /etc/corners/secrets.env; set +a; cd '$BASE/app' && python3 -m collector --config '$BASE/app/config/production.toml' $*"; }

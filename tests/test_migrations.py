@@ -49,7 +49,7 @@ def test_migrated_v4_equals_fresh(tmp_path):
     dbc.apply_migrations(old)
     fresh = dbc.connect(tmp_path / "fresh.db", create=True)
     assert schema_of(old) == schema_of(fresh)
-    assert old.execute("PRAGMA user_version").fetchone()[0] == fresh.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert old.execute("PRAGMA user_version").fetchone()[0] == fresh.execute("PRAGMA user_version").fetchone()[0] == 7
     assert old.execute("SELECT * FROM close_rule").fetchall() == fresh.execute("SELECT * FROM close_rule").fetchall()
 
 
@@ -57,7 +57,7 @@ def test_migration_preserves_rows_and_contract(tmp_path):
     old = v4_database(tmp_path / "old.db")
     before = {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in
               ("raw_response", "fixture", "fixture_state_obs", "outcome_obs", "endpoint_allowlist")}
-    assert dbc.apply_migrations(old) == [5, 6]
+    assert dbc.apply_migrations(old) == [5, 6, 7]
     dbc.assert_schema_contract(old)
     after = {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in before}
     assert before == after
@@ -71,6 +71,7 @@ def test_failed_migration_rolls_back(tmp_path, monkeypatch):
     bad.mkdir()
     (bad / "005_bad.sql").write_text("CREATE TABLE half_done (x INTEGER) STRICT;\nTHIS IS NOT SQL;\nPRAGMA user_version = 5;\n")
     (bad / "006_never.sql").write_text("PRAGMA user_version = 6;\n")
+    (bad / "007_never.sql").write_text("PRAGMA user_version = 7;\n")
     monkeypatch.setattr(dbc, "MIGRATIONS_DIR", bad)
     with pytest.raises(sqlite3.Error):
         dbc.apply_migrations(old)
@@ -81,7 +82,7 @@ def test_failed_migration_rolls_back(tmp_path, monkeypatch):
 def test_migration_files_must_be_contiguous(tmp_path, monkeypatch):
     gap = tmp_path / "migs"
     gap.mkdir()
-    (gap / "006_skip.sql").write_text("PRAGMA user_version = 6;")
+    (gap / "009_skip.sql").write_text("PRAGMA user_version = 9;")
     monkeypatch.setattr(dbc, "MIGRATIONS_DIR", gap)
     with pytest.raises(dbc.ConnectionContractError, match="contiguously"):
         dbc.migrations()
@@ -113,13 +114,13 @@ def test_migrate_cli_backs_up_first(tmp_path, capsys, monkeypatch):
                                           'review_dir = "data/review"\nactive_jobs = ["af_odds"]\n[[leagues]]\nleague_id = 39\nseason = 2026\n')
     assert main(["--config", str(tmp_path / "config.toml"), "migrate"]) == 0
     first = json.loads(capsys.readouterr().out)
-    assert first["migrated"] == [5, 6] and first["backup_restore_test"] == "ok"
+    assert first["migrated"] == [5, 6, 7] and first["backup_restore_test"] == "ok"
     assert "pre-migrate-v4" in first["backup"] and Path(first["backup"]).exists()
     assert main(["--config", str(tmp_path / "config.toml"), "migrate"]) == 0
     assert json.loads(capsys.readouterr().out)["migrated"] == []
     assert main(["--config", str(tmp_path / "config.toml"), "check-config"]) == 0
     info = json.loads(capsys.readouterr().out)
-    assert info["db_exists"] and info["db_user_version"] == 6 and info["fixtures"] == 1
+    assert info["db_exists"] and info["db_user_version"] == 7 and info["fixtures"] == 1
 
 
 def test_check_config_flags_wrong_path(tmp_path, capsys):
@@ -129,8 +130,8 @@ def test_check_config_flags_wrong_path(tmp_path, capsys):
     assert not (tmp_path / "nowhere").exists()
 
 
-def test_v5_database_migrates_to_v6(tmp_path):
-    """The VM is at v5 now: the hotfix path is 5 -> 6 only."""
+def test_v5_database_migrates_to_current(tmp_path):
+    """A v5 database (the state before the v0.5.1 hotfix) still migrates: 5 -> 6 -> 7."""
     old = v4_database(tmp_path / "old.db")
     real = dbc.MIGRATIONS_DIR
     five = tmp_path / "only5"
@@ -144,8 +145,31 @@ def test_v5_database_migrates_to_v6(tmp_path):
     finally:
         dbc.MIGRATIONS_DIR, dbc.SCHEMA_VERSION = real, saved
     assert old.execute("PRAGMA user_version").fetchone()[0] == 5
-    assert dbc.apply_migrations(old) == [6]
+    assert dbc.apply_migrations(old) == [6, 7]
     dbc.assert_schema_contract(old)
     fresh = dbc.connect(tmp_path / "fresh.db", create=True)
     assert schema_of(old) == schema_of(fresh)
     assert old.execute("SELECT count(*) FROM personal_endpoint").fetchone()[0] == 2
+
+
+def test_v6_database_migrates_to_v7(tmp_path):
+    """The VM is at v6 now: the v0.5.4 path is 6 -> 7 only, and keeps every row."""
+    old = v4_database(tmp_path / "old.db")
+    real = dbc.MIGRATIONS_DIR
+    six = tmp_path / "upto6"
+    six.mkdir()
+    for f in ("005_v05.sql", "006_v051.sql"):
+        (six / f).write_text((real / f).read_text())
+    saved = dbc.SCHEMA_VERSION
+    try:
+        dbc.MIGRATIONS_DIR, dbc.SCHEMA_VERSION = six, 6
+        dbc.apply_migrations(old)
+    finally:
+        dbc.MIGRATIONS_DIR, dbc.SCHEMA_VERSION = real, saved
+    before = {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+              for t in ("raw_response", "api_request", "capture_slot", "fixture")}
+    assert dbc.apply_migrations(old) == [7]
+    dbc.assert_schema_contract(old)
+    assert before == {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in before}
+    assert schema_of(old) == schema_of(dbc.connect(tmp_path / "fresh.db", create=True))
+    assert [r[0] for r in old.execute("SELECT user_version FROM schema_event ORDER BY 1")] == [6, 7]

@@ -25,8 +25,11 @@ Pre-registered additions (v0.5.2, before any gate data; DESIGN §0.2-§0.3):
     it replaces v1 for a market family only through a new close-rule version,
     by the switching rule in DESIGN §0.2, decided from suspension counts alone.
   start sources: a fixture counts toward G0.5a only with >= 2 start sources.
-  main line (totals, spreads): the line whose two sides, de-vigged
-    multiplicatively, are closest to 50/50 at cutoff - 60 min.
+  main line (totals, spreads): among HALF lines only (x.5: binary outcome, no
+    push or half-win), the line whose two sides, de-vigged multiplicatively, are
+    closest to 50/50 at cutoff - 60 min (amended 30 Oct, before any data).
+  confirmatory families: CONFIRMATORY_FAMILIES; every other family is excluded
+    with a recorded reason (family_eligibility).
   look-ahead L2 flags trigger inspection (lookahead_gate), not exclusion.
 """
 from __future__ import annotations
@@ -190,11 +193,52 @@ def _is_team_market(player_id: str) -> bool:
     return player_id in ("0", "", "None", "null")
 
 
+CONFIRMATORY_FAMILIES = {
+    "1x2:fulltime": "full-time result; one market",
+    "bothteamsscore:fulltime": "both teams to score; one market",
+    "totals:fulltime": "goals over/under; main half-goal line",
+    "spreads:fulltime": "Asian handicap; main half-goal line",
+    "totals-corners:fulltime": "corners over/under; main half line",
+    "spreads-corners:fulltime": "corner handicap; main half line",
+}
+_EXCLUDED = [   # (test, reason), first match wins; pre-registered 30 Oct
+    (lambda t, p: p != "fulltime", "first-half (and other part-match) markets: excluded to keep the confirmatory "
+                                   "family count small; same fixtures, no new sample"),
+    (lambda t, p: t in ("correctscore", "winningmargin", "halftime-fulltime") or t.startswith("exactscore"),
+     "many-outcome market: withdrawn longshot outcomes make 'every side closed' fail by construction "
+     "(A9: 3 of 28 and 1 of 9 suspended), and a withdrawn-outcome rule would add a researcher choice"),
+    (lambda t, p: t == "spreads-european", "3-way handicap: the main-line rule is defined for 2-way lines; "
+                                           "redundant with the Asian handicap"),
+    (lambda t, p: "bookings" in t, "no bookings outcomes are collected"),
+    (lambda t, p: t.startswith("players-") or t == "firstgoal", "needs player or goal-event data that is not collected"),
+    (lambda t, p: t.startswith("teamtotals"), "team totals: redundant with match totals and handicaps"),
+    (lambda t, p: t in ("doublechance", "drawnobet") or t.startswith(("wintonil", "toscore", "oddeven")),
+     "derived from or redundant with 1X2, BTTS or totals (odd/even: no plausible information)"),
+]
+
+
+def family_eligibility(family: str) -> tuple[str, str]:
+    """('confirmatory', why) for the six pre-registered families, else ('excluded', reason)."""
+    if family in CONFIRMATORY_FAMILIES:
+        return "confirmatory", CONFIRMATORY_FAMILIES[family]
+    mtype, _, period = family.partition(":")
+    for test, reason in _EXCLUDED:
+        if test(mtype, period):
+            return "excluded", reason
+    return "excluded", "not in the pre-registered family list"
+
+
+def _half_line(h: float | None) -> bool:
+    return h is not None and abs(abs(h) % 1 - 0.5) < 1e-9
+
+
 def main_lines(series: dict, cutoff_ms: int, catalog: dict[str, dict]) -> dict[str, str]:
     """family -> main market id. Families with one market (1x2, BTTS) are their own main
-    line. For two-way families with several lines (totals, spreads) the main line is the
-    one whose sides, de-vigged multiplicatively, are closest to 50/50 at cutoff - 60 min,
-    with both sides active then. Ties: smaller |handicap|, then lower market id."""
+    line. For two-way families with several lines (totals, spreads) the main line is,
+    among HALF lines only (x.5: a binary outcome, no push or half-win), the one whose
+    sides, de-vigged multiplicatively, are closest to 50/50 at cutoff - 60 min, with
+    both sides active then. Ties: smaller |handicap|, then lower market id. Families
+    with several 3-way markets (European handicap) have no main line by this rule."""
     t = cutoff_ms - MAIN_LINE_LEAD_MS
     fams: dict[str, dict[str, dict[str, Record | None]]] = {}
     for (m, o, pl), recs in series.items():
@@ -210,6 +254,8 @@ def main_lines(series: dict, cutoff_ms: int, catalog: dict[str, dict]) -> dict[s
         best = None
         for m, sides in markets.items():
             if len(sides) != 2 or any(r is None or not r.active for r in sides.values()):
+                continue
+            if not _half_line(catalog[m]["handicap"]):
                 continue
             inv = [1 / r.price for r in sides.values()]
             dist = abs(inv[0] / sum(inv) - 0.5)
@@ -303,8 +349,9 @@ def fixture_close_report(body: dict, cut: Cutoff, book: str = "pinnacle", catalo
                 f["main_sides_closed_v1"] += c.reason is None
                 f["main_sides_closed_v1b"] += bridged[(mk, o, pl)].reason is None
                 f["main_sides_suspended_v1"] += c.reason == "suspended_at_cutoff"
-        for f in fam.values():
+        for name, f in fam.items():
             f["markets"] = len(f["markets"])
+            f["eligibility"], f["eligibility_reason"] = family_eligibility(name)
             f["main_line_usable_v1"] = f["main_sides"] > 0 and f["main_sides_closed_v1"] == f["main_sides"]
             f["main_line_usable_v1b"] = f["main_sides"] > 0 and f["main_sides_closed_v1b"] == f["main_sides"]
         rep["by_family"] = dict(sorted(fam.items()))

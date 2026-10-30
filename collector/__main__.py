@@ -28,7 +28,8 @@ from .store import Archive, init_db, now_ms, open_db, seed
 JOB_OF = {"af-fixtures": "af_fixtures", "af-odds": "af_odds", "af-results": "af_results",
           "op-account": "op_account", "op-fixtures": "op_fixtures", "op-history": "op_history",
           "af-bootstrap": "af_bootstrap", "op-catalog": "op_catalog", "op-check-fixture": "op_history",
-          "op-backfill": "op_backfill", "af-backfill": "af_results", "repair-damaged": "af_results"}
+          "op-backfill": "op_backfill", "af-backfill": "af_results", "repair-damaged": "af_results",
+          "op-history-probe": "op_history"}
 
 
 def by_timer() -> bool:
@@ -74,6 +75,11 @@ def watchdog_cmd(cfg, con) -> int:
             "SELECT raw_id, provider, endpoint, rule FROM v_redaction_alerts WHERE received_at_ms > ?",
             (t - 86_400_000,)):
         problems.append({"check": "redaction", "what": f"{rule} fired on data endpoint {prov} {ep}", "raw_id": raw_id})
+    if "op_history" in cfg.active_jobs:
+        h = history_health(con, t)
+        if h["forward_requests_24h"] >= 10 and h["forward_no_history_share_24h"] > 0.5:
+            problems.append({"check": "op_history", "what": f"no_history on {h['forward_no_history_share_24h']:.0%} of "
+                             f"{h['forward_requests_24h']} requests for fixtures started in the last 7 days"})
     for p in backup_state(con, cfg)["problems"]:
         problems.append({"check": p.split(":")[0], "what": p.split(":", 1)[1]})
     by = {}
@@ -133,6 +139,11 @@ def main(argv=None) -> int:
     p.add_argument("--af-first-half-start", help="ISO UTC actual start, if known")
     p = sub.add_parser("af-backfill", help="outcomes for finished fixtures older than 72 h (exploration seasons)")
     p.add_argument("--max", type=int, default=1500)
+    p = sub.add_parser("op-history-probe", help="one-off: which months does /v4/historical-odds answer for? (free)")
+    p.add_argument("--tournaments", default="17,8", help="OddsPapi tournament ids, comma-separated (default EPL, La Liga)")
+    p.add_argument("--year", type=int, default=2026)
+    p.add_argument("--months", default="1-10", help="e.g. 1-10 or 1,4,7")
+    p.add_argument("--control", default="id1000001772221292", help="a fixture known to return history ('' for none)")
     p = sub.add_parser("op-backfill")
     p.add_argument("--max", type=int, default=600)
     p = sub.add_parser("map-load-teams", help="load a reviewed team CSV exactly as committed in git")
@@ -226,6 +237,7 @@ def main(argv=None) -> int:
     scheduled = timer_cmd and by_timer()
     fetcher = Fetcher(con, Archive(cfg.archive_dir), secrets=(cfg.af_key, cfg.op_key))
     ping(cfg, a.cmd, "/start")
+    result = None
     try:
         with ledger.run_slot(con, job, by_hand=not scheduled) as slot:
             result = dispatch(cfg, con, fetcher, slot, a)
@@ -241,6 +253,8 @@ def main(argv=None) -> int:
         ping(cfg, a.cmd, "/fail", redact_text(f"{a.cmd} QUOTA REFUSED: {e}", (cfg.af_key, cfg.op_key))[:2000])
         return 2
     except Exception as e:
+        if result is not None:      # the work finished but the slot didn't close: still show what was done
+            out(result)
         print(f"{a.cmd} FAILED: {type(e).__name__}: {e}", file=sys.stderr)
         # The message leaves the box: scrub live keys from it first.
         ping(cfg, a.cmd, "/fail", redact_text(f"{a.cmd} FAILED: {type(e).__name__}: {e}",
@@ -304,6 +318,14 @@ def dispatch(cfg, con, fetcher, slot, a):
         res = {"mapping": mapping.apply(cfg, con)}
         res.update(op.history(slot))
         return res
+    if a.cmd == "op-history-probe":
+        if "-" in a.months:
+            lo, hi = (int(x) for x in a.months.split("-"))
+            months = list(range(lo, hi + 1))
+        else:
+            months = [int(x) for x in a.months.split(",")]
+        return op.history_probe(slot, [int(x) for x in a.tournaments.split(",") if x], a.year, months,
+                                a.control or None, now_ms())
     if a.cmd == "op-backfill":
         ids = op.history_due(now_ms())
         ids = ids[: a.max]
@@ -478,6 +500,28 @@ def storage(cfg, t_ms: int) -> dict:
             "days_until_disk_full_at_this_rate": round(du.free / day_bytes) if day_bytes else None}
 
 
+def history_health(con, t: int) -> dict:
+    """OddsPapi history coverage. 'Forward' = fixtures that started in the last 7 days:
+    those should have history, so a high no_history share there is an alert (a vendor
+    change would otherwise look like a run of quietly settled 404s)."""
+    one = lambda sql, *p: con.execute(sql, p).fetchone()  # noqa: E731
+    params = ("SELECT a.request_id, a.status, substr(a.params_canonical, instr(a.params_canonical, 'fixtureId=') + 10) AS fid,"
+              " EXISTS (SELECT 1 FROM request_outcome o WHERE o.request_id = a.request_id) AS nohist,"
+              " (SELECT max(r.received_at_ms) FROM raw_response r WHERE r.request_id = a.request_id) AS at"
+              " FROM api_request a WHERE a.provider = 'oddspapi' AND a.endpoint = '/v4/historical-odds'")
+    fwd = one("SELECT count(*), coalesce(sum(q.nohist), 0) FROM (" + params + ") q"
+              " JOIN (SELECT provider_fixture_id, max(start_ms) AS s FROM provider_fixture_candidate GROUP BY 1) c"
+              "  ON c.provider_fixture_id = q.fid WHERE q.at > ? AND c.s > ?", t - 86_400_000, t - 7 * 86_400_000)
+    allq = one("SELECT count(*), coalesce(sum(status = 'complete'), 0), coalesce(sum(nohist), 0),"
+               " coalesce(sum(status = 'failed' AND nohist = 0), 0) FROM (" + params + ") WHERE at > ?", t - 86_400_000)
+    fixtures = one("SELECT count(DISTINCT fid) FILTER (WHERE status = 'complete'),"
+                   " count(DISTINCT fid) FILTER (WHERE nohist = 1) FROM (" + params + ")")
+    return {"requests_24h": allq[0], "usable_24h": allq[1], "no_history_24h": allq[2], "failed_24h": allq[3],
+            "forward_requests_24h": fwd[0],
+            "forward_no_history_share_24h": round(fwd[1] / fwd[0], 3) if fwd[0] else 0.0,
+            "fixtures_with_history": fixtures[0], "fixtures_with_a_no_history_answer": fixtures[1]}
+
+
 def raw_vs_requests(con) -> dict:
     """Why raw_response has more rows than api_request, all time:
     raw_rows = requests - requests_without_raw + extra_pages + retries, where
@@ -514,6 +558,7 @@ def report(con, cfg=None) -> dict:
         "by_hand_runs_last_24h": q("SELECT job, status, count(*) FROM capture_slot WHERE started_at_ms > ?"
                                    " AND note IS ? GROUP BY job, status ORDER BY job, status", day, ledger.BY_HAND_NOTE),
         "raw_vs_requests": raw_vs_requests(con),
+        "op_history": history_health(con, t),
         "raw_last_24h": q("SELECT a.provider, a.endpoint, sum(r.usable), count(*) FROM raw_response r"
                           " JOIN api_request a ON a.request_id=r.request_id WHERE r.received_at_ms > ?"
                           " GROUP BY a.provider, a.endpoint", day),
