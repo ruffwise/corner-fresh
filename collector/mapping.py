@@ -17,6 +17,7 @@ Workflow, with a human in the loop for the exact team allowlist:
 from __future__ import annotations
 
 import csv
+import re
 import sqlite3
 from collections import defaultdict
 from pathlib import Path
@@ -55,43 +56,106 @@ def _af_matches(con, leagues, start_ms):
     return rows
 
 
-def propose_teams(cfg: Config, con: sqlite3.Connection, out: Path, provider: str = "oddspapi") -> int:
+# OddsPapi lists undecided ties with placeholder participants ("Winner Match 2"). They
+# are never real teams, so they are never proposed and the loader refuses them.
+PLACEHOLDER = re.compile(
+    r"^\s*(winner|loser|runner[- ]?up)s?\s+(of\s+)?(match|game|tie|group|semi|quarter|qf|sf|r\d|\d)"
+    r"|\b(tbd|tba|to be (decided|announced))\b|^\s*(match|game|team)\s+\d+\s*$|\bplaceholder\b", re.I)
+DOMINANCE = 5        # accept a row with conflicts only if its support is >= 5 x the conflicting support
+
+
+def is_placeholder(name: str | None) -> bool:
+    return bool(name) and bool(PLACEHOLDER.search(name))
+
+
+def propose_teams(cfg: Config, con: sqlite3.Connection, out: Path, provider: str = "oddspapi") -> dict:
+    """Propose provider participant -> api-football team pairs, for review.
+
+    Evidence, per candidate fixture in a configured league:
+      kickoff:  exactly one api-football fixture kicks off within 15 minutes;
+      opponent: several do (simultaneous kickoffs, as on a UEFA matchday), but one
+                participant is already APPROVED (loaded from a reviewed commit), and
+                exactly one of those fixtures has that team on the same side. That
+                pins the fixture, so the other participant is proposed as the other
+                side. Only approved pairs propagate, never proposals from this run:
+                each round of evidence rests on reviewed mappings. Load, then
+                propose again, to take the next step.
+    Names are evidence for the reviewer only; nothing is matched by name.
+
+    Every row gets a `decision`: 'accept', or 'REVIEW: <why>'. The loader takes only
+    rows marked accept; the reviewer deletes wrong rows and resolves REVIEW rows.
+      accept: no conflicting team, or support >= DOMINANCE x all conflicting support;
+      REVIEW: weaker conflicts, a team already approved for another key, or a team
+              proposed for two keys in this file.
+    """
     t2l = _tournament_league(cfg)
-    known = {r[0] for r in con.execute("SELECT provider_team_key FROM provider_team_map WHERE provider=?", (provider,))}
-    support: dict[tuple[str, int], list] = defaultdict(list)
+    approved = dict(con.execute("SELECT provider_team_key, team_id FROM provider_team_map WHERE provider=?",
+                                (provider,)))
+    approved_key_of = {t: k for k, t in approved.items()}
+    support: dict[tuple[str, int], dict[str, set]] = defaultdict(lambda: {"kickoff": set(), "opponent": set()})
     names: dict[str, str] = {}
+    placeholders: dict[str, str] = {}
     for pid, tkey, hk, ak, hn, an, start in _latest_candidates(con, provider):
         league = t2l.get(tkey)
         if league is None:
             continue
         names[hk], names[ak] = hn, an
+        for k, nm in ((hk, hn), (ak, an)):
+            if is_placeholder(nm):
+                placeholders[k] = nm
         matches = _af_matches(con, league, start)
         if len(matches) == 1:
             _, hid, aid, _, _, _ = matches[0]
-            support[(hk, hid)].append(pid)
-            support[(ak, aid)].append(pid)
+            support[(hk, hid)]["kickoff"].add(pid)
+            support[(ak, aid)]["kickoff"].add(pid)
+        elif len(matches) > 1:
+            if hk in approved and ak not in approved:
+                pin = [m for m in matches if m[1] == approved[hk]]
+                if len(pin) == 1:
+                    support[(ak, pin[0][2])]["opponent"].add(pid)
+            elif ak in approved and hk not in approved:
+                pin = [m for m in matches if m[2] == approved[ak]]
+                if len(pin) == 1:
+                    support[(hk, pin[0][1])]["opponent"].add(pid)
     by_key: dict[str, list] = defaultdict(list)
-    for (k, team), pids in support.items():
-        by_key[k].append((team, len(pids)))
+    for (k, team), ev in support.items():
+        if k in approved or k in placeholders:
+            continue
+        by_key[k].append((team, len(ev["kickoff"] | ev["opponent"]), len(ev["kickoff"]), len(ev["opponent"])))
     team_names = dict(con.execute("SELECT team_id, name FROM team").fetchall())
+    best_of = {k: sorted(v, key=lambda x: (-x[1], x[0]))[0][0] for k, v in by_key.items()}
+    claimed = defaultdict(list)
+    for k, t in best_of.items():
+        claimed[t].append(k)
     out.parent.mkdir(parents=True, exist_ok=True)
-    n = 0
+    stats = {"proposed_rows": 0, "accept": 0, "review": 0, "via_opponent_rows": 0,
+             "placeholders_excluded": sorted(set(placeholders.values()))}
     with open(out, "w", newline="") as fh:
-        w = csv.writer(fh)
+        w = csv.writer(fh, lineterminator="\n")      # plain newlines: grep-friendly for the reviewer
         w.writerow(["provider", "provider_team_key", "provider_team_name", "team_id", "af_team_name",
-                    "supporting_fixtures", "conflicts"])
+                    "supporting_fixtures", "via_kickoff", "via_opponent", "conflicts", "decision"])
         for k in sorted(by_key, key=lambda x: names.get(x, "")):
-            if k in known:
-                continue
-            opts = sorted(by_key[k], key=lambda x: -x[1])
-            best, cnt = opts[0]
-            conflicts = "; ".join(f"{team_names.get(t)}({c})" for t, c in opts[1:])
-            w.writerow([provider, k, names.get(k, ""), best, team_names.get(best, ""), cnt, conflicts])
-            n += 1
-    return n
+            opts = sorted(by_key[k], key=lambda x: (-x[1], x[0]))
+            best, cnt, n_ko, n_opp = opts[0]
+            others = opts[1:]
+            conflicts = "; ".join(f"{team_names.get(t)}({c})" for t, c, _, _ in others)
+            if best in approved_key_of:
+                decision = f"REVIEW: team already approved for key {approved_key_of[best]}"
+            elif len(claimed[best]) > 1:
+                decision = "REVIEW: team also proposed for key " + ", ".join(x for x in claimed[best] if x != k)
+            elif others and cnt < DOMINANCE * sum(c for _, c, _, _ in others):
+                decision = f"REVIEW: conflicts not dominated ({cnt} vs {sum(c for _, c, _, _ in others)})"
+            else:
+                decision = "accept"
+            w.writerow([provider, k, names.get(k, ""), best, team_names.get(best, ""), cnt, n_ko, n_opp,
+                        conflicts, decision])
+            stats["proposed_rows"] += 1
+            stats["accept" if decision == "accept" else "review"] += 1
+            stats["via_opponent_rows"] += n_opp > 0
+    return stats
 
 
-def load_teams_from_git(con: sqlite3.Connection, repo: Path, commit: str, path_in_repo: str) -> int:
+def load_teams_from_git(con: sqlite3.Connection, repo: Path, commit: str, path_in_repo: str) -> dict:
     """Load the reviewed CSV exactly as committed: the bytes come from git, not from a
     working copy that could differ from what the commit hash claims."""
     import subprocess
@@ -103,29 +167,46 @@ def load_teams_from_git(con: sqlite3.Connection, repo: Path, commit: str, path_i
     return _load_rows(con, blob.decode("utf-8").splitlines(), commit)
 
 
-def load_teams(con: sqlite3.Connection, path: Path, commit: str) -> int:
+def load_teams(con: sqlite3.Connection, path: Path, commit: str) -> dict:
     if len(commit) != 40:
         raise ValueError("commit must be the full 40-character git hash that contains the reviewed CSV")
     with open(path, newline="") as fh:
         return _load_rows(con, fh.read().splitlines(), commit)
 
 
-def _load_rows(con: sqlite3.Connection, lines: list[str], commit: str) -> int:
-    n = 0
+def _load_rows(con: sqlite3.Connection, lines: list[str], commit: str) -> dict:
+    """All or nothing. A row is loaded only if its decision is 'accept' (or, in a CSV
+    from before the decision column, if it lists no conflicts). A row identical to an
+    already-approved pair is skipped, so a cumulative CSV can be loaded again; a row
+    that would CHANGE an approved pair is refused."""
+    n = skipped = 0
     con.execute("BEGIN")
     try:
         for row in csv.DictReader(lines):
-            if row.get("conflicts"):
-                raise ValueError(f"row for {row['provider_team_key']} still lists conflicts: resolve before loading")
+            key, team = row["provider_team_key"], int(row["team_id"])
+            if is_placeholder(row.get("provider_team_name")):
+                raise ValueError(f"row for {key} is a placeholder participant ({row['provider_team_name']!r}): delete it")
+            if "decision" in row:
+                if (row["decision"] or "").strip() != "accept":
+                    raise ValueError(f"row for {key} is marked {row['decision']!r}: resolve it to 'accept' or delete "
+                                     "the row before loading")
+            elif row.get("conflicts"):
+                raise ValueError(f"row for {key} still lists conflicts: resolve before loading")
+            have = con.execute("SELECT team_id FROM provider_team_map WHERE provider=? AND provider_team_key=?",
+                               (row["provider"], key)).fetchone()
+            if have is not None:
+                if have[0] != team:
+                    raise ValueError(f"row for {key} would change an approved pair ({have[0]} -> {team})")
+                skipped += 1
+                continue
             con.execute("INSERT INTO provider_team_map VALUES (?,?,?,?,?)",
-                        (row["provider"], row["provider_team_key"], row["provider_team_name"],
-                         int(row["team_id"]), commit))
+                        (row["provider"], key, row["provider_team_name"], team, commit))
             n += 1
     except BaseException:
         con.execute("ROLLBACK")
         raise
     con.execute("COMMIT")
-    return n
+    return {"loaded": n, "already_loaded": skipped}
 
 
 def apply(cfg: Config, con: sqlite3.Connection, provider: str = "oddspapi") -> dict:

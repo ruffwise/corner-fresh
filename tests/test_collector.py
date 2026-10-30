@@ -439,7 +439,7 @@ def test_mapping_end_to_end(env, tmp_path):
     fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing()))
     run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s))
     csv_path = tmp_path / "teams.csv"
-    assert mapping.propose_teams(cfg, con, csv_path) == 2
+    assert mapping.propose_teams(cfg, con, csv_path)["proposed_rows"] == 2
     assert mapping.apply(cfg, con) == {"team_not_allowlisted": 1}     # nothing maps before approval
     mapping.load_teams(con, csv_path, "c" * 40)
     assert mapping.apply(cfg, con) == {"mapped": 1}
@@ -695,7 +695,7 @@ def test_load_teams_reads_committed_bytes_not_working_copy(env, tmp_path):
     subprocess.run(g + ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "map"], check=True)
     sha = subprocess.run(g + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     (repo / "review" / "t.csv").write_text(csv_text + "oddspapi,44,Away FC,2,Away FC,3,\n")   # uncommitted edit
-    assert mapping.load_teams_from_git(con, repo, sha, "review/t.csv") == 1
+    assert mapping.load_teams_from_git(con, repo, sha, "review/t.csv")["loaded"] == 1
     assert con.execute("SELECT approved_in_commit FROM provider_team_map").fetchall() == [(sha,)]
     with pytest.raises(ValueError):
         mapping.load_teams_from_git(con, repo, sha[:12], "review/t.csv")
@@ -1081,3 +1081,136 @@ def test_history_window_start_is_measured(env, tmp_path):
     fake.add(*HIST, (200, {"fixtureId": "idA", "bookmakers": {}}))
     run(con, "op_history", lambda s: op.history(s))
     assert history_window_start_ms(con) == close.iso_ms("2026-10-10T16:30:00Z")
+
+
+# --- v0.5.6: team-map proposals: placeholders, opponent propagation, decisions ----------------------
+
+def ucl_world(env, tmp_path):
+    """Domestic league 39 (tournament 17) plus UCL (league 2, tournament 7) with three
+    league-stage fixtures at the SAME kickoff, so kickoff agreement alone can't map them."""
+    import dataclasses
+    from collector.config import League
+    cfg, con, fake, f = env
+    cfg2 = dataclasses.replace(cfg, leagues=(League(39, 2026, 17), League(2, 2026, 7)))
+    ko_dom = close.iso_ms("2026-10-03T14:00:00Z")
+    ko_ucl = close.iso_ms("2026-10-21T19:00:00Z")
+    fake.add("/fixtures", {"league": 39, "season": 2026},
+             (200, af_page([af_fixture(500, ko_dom, home=(10, "Arsenal"), away=(11, "Leeds"))])))
+    fake.add("/leagues", {"id": 2, "season": 2026}, (200, af_page([{"league": {"id": 2, "name": "UCL", "type": "Cup"},
+                                                                      "country": {"name": "World"}}])))
+    fake.add("/fixtures", {"league": 2, "season": 2026}, (200, af_page([
+        af_fixture(601, ko_ucl, league=2, round_="League Stage - 3", home=(10, "Arsenal"), away=(20, "PSV")),
+        af_fixture(602, ko_ucl, league=2, round_="League Stage - 3", home=(21, "Porto"), away=(22, "Slavia")),
+        af_fixture(603, ko_ucl, league=2, round_="League Stage - 3", home=(23, "Celtic"), away=(11, "Leeds"))])))
+    run(con, "af_fixtures", lambda s: AF(cfg2, con, f).fixtures(s))
+    c = lambda fid, t, hk, hn, ak, an, st: {"fixtureId": fid, "participant1Id": hk, "participant2Id": ak,  # noqa: E731
+                                            "participant1Name": hn, "participant2Name": an, "startTime": st,
+                                            "statusId": 0, "tournamentId": t}
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, [c("d1", 17, 42, "Arsenal FC", 34, "Leeds United",
+                                                            "2026-10-03T14:00:00Z")]))
+    fake.add("/v4/fixtures", {"tournamentId": 7}, (200, [
+        c("u1", 7, 42, "Arsenal FC", 2952, "PSV Eindhoven", "2026-10-21T19:00:00Z"),
+        c("u2", 7, 3002, "FC Porto", 2216, "Slavia Prague", "2026-10-21T19:00:00Z"),
+        c("u3", 7, 2352, "Celtic Glasgow", 34, "Leeds United", "2026-10-21T19:00:00Z"),
+        c("u4", 7, 1374138, "Winner Match 2", 2216, "Slavia Prague", "2026-08-20T19:00:00Z")]))
+    run(con, "op_fixtures", lambda s: OP(cfg2, con, f).fixtures(s, force=[17, 7]))
+    return cfg2
+
+
+def read_rows(path):
+    import csv as _csv
+    return {r["provider_team_key"]: r for r in _csv.DictReader(open(path))}
+
+
+def test_simultaneous_kickoffs_need_an_approved_opponent(env, tmp_path):
+    cfg, con, fake, f = env
+    cfg2 = ucl_world(env, tmp_path)
+    p1 = tmp_path / "v1.csv"
+    r1 = mapping.propose_teams(cfg2, con, p1)
+    rows = read_rows(p1)
+    assert set(rows) == {"42", "34"}                      # domestic only: UEFA kickoffs are ambiguous
+    assert r1["via_opponent_rows"] == 0 and r1["placeholders_excluded"] == ["Winner Match 2"]
+    assert mapping.load_teams(con, p1, "a" * 40) == {"loaded": 2, "already_loaded": 0}
+    p2 = tmp_path / "v2.csv"
+    r2 = mapping.propose_teams(cfg2, con, p2)
+    rows = read_rows(p2)
+    assert rows["2952"]["team_id"] == "20" and rows["2952"]["via_opponent"] == "1"      # PSV, pinned by Arsenal
+    assert rows["2352"]["team_id"] == "23"                                              # Celtic, pinned by Leeds
+    assert "3002" not in rows and "2216" not in rows                                    # no approved opponent
+    assert "1374138" not in rows and r2["via_opponent_rows"] == 2
+    assert mapping.load_teams(con, p2, "b" * 40)["loaded"] == 2
+    assert mapping.apply(cfg2, con).get("mapped") == 3                                  # d1, u1, u3
+
+
+def test_cumulative_csv_reloads_and_changes_are_refused(env, tmp_path):
+    cfg, con, fake, f = env
+    cfg2 = ucl_world(env, tmp_path)
+    p1 = tmp_path / "v1.csv"
+    mapping.propose_teams(cfg2, con, p1)
+    mapping.load_teams(con, p1, "a" * 40)
+    assert mapping.load_teams(con, p1, "a" * 40) == {"loaded": 0, "already_loaded": 2}
+    bad = tmp_path / "bad.csv"
+    bad.write_text(p1.read_text().replace(",42,Arsenal FC,10,", ",42,Arsenal FC,11,"))
+    with pytest.raises(ValueError, match="would change an approved pair"):
+        mapping.load_teams(con, bad, "c" * 40)
+
+
+def test_loader_needs_accept_and_refuses_placeholders(env, tmp_path):
+    cfg, con, fake, f = env
+    head = "provider,provider_team_key,provider_team_name,team_id,af_team_name,supporting_fixtures,via_kickoff,via_opponent,conflicts,decision\n"
+    p = tmp_path / "t.csv"
+    p.write_text(head + "oddspapi,17,Home FC,1,Home FC,3,3,0,Away FC(1),REVIEW: conflicts not dominated (3 vs 1)\n")
+    with pytest.raises(ValueError, match="resolve it to 'accept'"):
+        mapping.load_teams(con, p, "c" * 40)
+    p.write_text(head + "oddspapi,1374138,Winner Match 2,1,Home FC,1,1,0,,accept\n")
+    with pytest.raises(ValueError, match="placeholder participant"):
+        mapping.load_teams(con, p, "c" * 40)
+
+
+@pytest.mark.parametrize("name,ph", [("Winner Match 2", True), ("Loser Match 7", True), ("TBD", True),
+                                     ("Match 4", True), ("Winners FC", False), ("Bodoe/Glimt", False),
+                                     ("Viking FK", False), ("Union Saint-Gilloise", False)])
+def test_placeholder_names(name, ph):
+    assert mapping.is_placeholder(name) is ph
+
+
+@pytest.mark.parametrize("n_good,want", [(5, "accept"), (4, "REVIEW: conflicts not dominated (4 vs 1)")])
+def test_decision_rules(env, tmp_path, n_good, want):
+    """5 vs 1 conflicting support is dominated (accept); 4 vs 1 is not (REVIEW)."""
+    cfg, con, fake, f = env
+
+    def world(n_good):
+        days = [f"2026-10-{d:02d}T15:00:00Z" for d in range(1, n_good + 3)]
+        af = [af_fixture(1000 + i, close.iso_ms(days[i]), home=(1, "Home FC"), away=(100 + i, f"Opp{i}"))
+              for i in range(n_good)]
+        af.append(af_fixture(1100, close.iso_ms(days[n_good]), home=(9, "Other FC"), away=(200, "Opp X")))
+        cands = [dict(listing()[0], fixtureId=f"c{i}", participant1Id=17, participant2Id=500 + i,
+                      participant2Name=f"P{i}", startTime=days[i]) for i in range(n_good)]
+        cands.append(dict(listing()[0], fixtureId="cx", participant1Id=17, participant2Id=600, participant2Name="PX",
+                          startTime=days[n_good]))
+        return af, cands
+
+    af, cands = world(n_good)
+    fake.add("/fixtures", {"league": 39, "season": 2026}, (200, af_page(af)))
+    run(con, "af_fixtures", lambda s: AF(cfg, con, f).fixtures(s))
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=cands)))
+    run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s, force=[17]))
+    out = tmp_path / "p.csv"
+    mapping.propose_teams(cfg, con, out)
+    assert read_rows(out)["17"]["decision"] == want
+
+
+def test_one_team_for_two_keys_is_review(env, tmp_path):
+    cfg, con, fake, f = env
+    seed_fixture(env, ko=close.iso_ms("2026-10-10T16:30:00Z"))
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=[
+        listing()[0], dict(listing()[0], fixtureId="idB", participant1Id=99, participant1Name="Home FC II")])))
+    run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s, force=[17]))
+    out = tmp_path / "p.csv"
+    mapping.propose_teams(cfg, con, out)
+    rows = read_rows(out)
+    assert rows["17"]["decision"].startswith("REVIEW: team also proposed for key 99")
+    assert rows["99"]["decision"].startswith("REVIEW: team also proposed for key 17")
