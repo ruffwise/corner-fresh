@@ -311,3 +311,31 @@ def test_l2_flag_rate_above_two_percent_fails_whatever_the_causes():
 def test_l2_unknown_cause_refused():
     with pytest.raises(ValueError, match="unknown causes"):
         close.lookahead_gate(control(flags=(3,)), {"f3": "looked fine"})
+
+
+# --- 30 Oct amendments (before any data) --------------------------------------------------------------
+
+def test_main_line_uses_half_lines_only():
+    t60 = iso(CUT - 70 * MIN)
+    cat = close.market_catalog([
+        {"marketId": 1062, "marketType": "spreads", "period": "fulltime", "handicap": -1.25},
+        {"marketId": 1060, "marketType": "spreads", "period": "fulltime", "handicap": -1.5},
+        {"marketId": 1068, "marketType": "spreads", "period": "fulltime", "handicap": -0.5},
+        {"marketId": 1064, "marketType": "spreads", "period": "fulltime", "handicap": -1.0}])
+    body = payload({("1062", "1062"): [(t60, 1.95, True)], ("1062", "1063"): [(t60, 1.95, True)],   # quarter: 50/50
+                    ("1064", "1064"): [(t60, 1.96, True)], ("1064", "1065"): [(t60, 1.94, True)],   # whole line
+                    ("1060", "1060"): [(t60, 2.30, True)], ("1060", "1061"): [(t60, 1.66, True)],
+                    ("1068", "1068"): [(t60, 1.50, True)], ("1068", "1069"): [(t60, 2.70, True)]})
+    assert close.main_lines(close.series_from_history(body), CUT, cat) == {"spreads:fulltime": "1060"}
+
+
+@pytest.mark.parametrize("fam,status", [
+    ("1x2:fulltime", "confirmatory"), ("totals:fulltime", "confirmatory"), ("spreads:fulltime", "confirmatory"),
+    ("bothteamsscore:fulltime", "confirmatory"), ("totals-corners:fulltime", "confirmatory"),
+    ("spreads-corners:fulltime", "confirmatory"), ("correctscore:fulltime", "excluded"),
+    ("winningmargin:fulltime", "excluded"), ("spreads-european:fulltime", "excluded"), ("1x2:p1", "excluded"),
+    ("totals-bookings:fulltime", "excluded"), ("doublechance:fulltime", "excluded"),
+    ("teamtotals-corners-team1:fulltime", "excluded"), ("something-new:fulltime", "excluded")])
+def test_family_eligibility_is_explicit(fam, status):
+    got, reason = close.family_eligibility(fam)
+    assert got == status and reason

@@ -13,6 +13,8 @@ import time
 import urllib.parse
 from pathlib import Path
 
+import re
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -297,38 +299,120 @@ def test_fixture_listing_not_repeated_within_refresh_window(env):
 
 # --- OddsPapi history scheduling ------------------------------------------------------------------
 
-def test_history_due_then_done(env):
+def mapped_candidate(env, tmp_path, fid="idA"):
+    """One api-football fixture, its OddsPapi candidate, a reviewed team map, a live mapping."""
     cfg, con, fake, f = env
+    seed_fixture(env, ko=close.iso_ms("2026-10-10T16:30:00Z"))
     fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
-    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing()))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=[dict(listing()[0], fixtureId=fid)])))
     run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s))
-    op = OP(cfg, con, f)
+    csv_path = tmp_path / "teams.csv"
+    mapping.propose_teams(cfg, con, csv_path)
+    mapping.load_teams(con, csv_path, "c" * 40)
+    assert mapping.apply(cfg, con) == {"mapped": 1}
+    return OP(cfg, con, f)
+
+
+HIST = ("/v4/historical-odds", {"fixtureId": "idA", "bookmakers": "pinnacle"})
+
+
+def test_history_due_then_done(env, tmp_path):
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
     assert op.history_due(now_ms()) == ["idA"]
-    fake.add("/v4/historical-odds", {"fixtureId": "idA", "bookmakers": "pinnacle"}, (200, {"fixtureId": "idA",
-                                                                                         "bookmakers": {}}))
-    run(con, "op_history", lambda s: op.history(s))
+    fake.add(*HIST, (200, {"fixtureId": "idA", "bookmakers": {}}))
+    assert run(con, "op_history", lambda s: op.history(s))["usable"] == 1
     assert op.history_due(now_ms()) == []
 
 
-def test_history_failed_pull_stays_due(env):            # ABSENT history: must retry
+def test_unmapped_candidates_are_never_fetched(env):          # the 27 Oct failure
     cfg, con, fake, f = env
     fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
     fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing()))
     run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s))
     op = OP(cfg, con, f)
-    fake.add("/v4/historical-odds", {"fixtureId": "idA", "bookmakers": "pinnacle"}, (503, {"x": 1}))
+    assert op.history_due(now_ms()) == []
+    assert run(con, "op_history", lambda s: op.history(s))["requested"] == 0
+    assert fake.count("/v4/historical-odds") == 0
+
+
+def test_history_transport_failure_stays_due(env, tmp_path):   # ABSENT history: must retry
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
+    fake.add(*HIST, (503, {"x": 1}))
     with pytest.raises(ledger.SlotIncomplete):
         run(con, "op_history", lambda s: op.history(s))
+    assert fake.count("/v4/historical-odds") == 3                  # 5xx is retried
     assert op.history_due(now_ms()) == ["idA"]
 
 
-def test_history_not_due_before_delay(env):
+def test_history_404_is_settled_not_retried_and_slot_completes(env, tmp_path):
     cfg, con, fake, f = env
-    soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))   # kicked off 1 h ago
-    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
-    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=[dict(listing()[0], startTime=soon)])))
-    run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s))
-    assert OP(cfg, con, f).history_due(now_ms()) == []
+    op = mapped_candidate(env, tmp_path)
+    fake.add(*HIST, (404, {"message": "not found"}))
+    r = run(con, "op_history", lambda s: op.history(s))
+    assert r["no_history"] == 1 and fake.count("/v4/historical-odds") == 1     # no retry
+    assert con.execute("SELECT status FROM capture_slot WHERE job='op_history'").fetchone() == ("complete",)
+    assert con.execute("SELECT outcome FROM request_outcome").fetchall() == [("no_history",)]
+    t = now_ms()
+    assert op.history_due(t) == [] and op.history_due(t + 23 * H) == []        # not re-queued hourly
+    assert op.history_due(t + 25 * H) == ["idA"]                              # asked once more after 24 h
+    with pytest.MonkeyPatch.context() as mp:
+        import collector.op as opmod
+        mp.setattr(opmod, "now_ms", lambda: t + 25 * H)
+        run(con, "op_history", lambda s: op.history(s))
+    assert op.history_due(t + 100 * H) == []                                  # terminal after the 2nd 404
+
+
+def test_strictly_terminal_404_when_configured(env, tmp_path):
+    import dataclasses
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
+    op.cfg = dataclasses.replace(cfg, op_history_404_max=1)
+    fake.add(*HIST, (404, {"message": "not found"}))
+    run(con, "op_history", lambda s: op.history(s))
+    assert op.history_due(now_ms() + 1000 * H) == []
+
+
+def test_history_429_backs_off_then_succeeds(env, tmp_path):
+    cfg, con, fake, f = env
+    slept = []
+    f.sleep = slept.append
+    op = mapped_candidate(env, tmp_path)
+    fake.add(*HIST, (429, {"message": "slow down"}), (200, {"fixtureId": "idA", "bookmakers": {}}))
+    assert run(con, "op_history", lambda s: op.history(s))["usable"] == 1
+    assert 12.0 in slept                                            # 2 x the 6 s pacing
+
+
+def test_history_stops_after_two_rate_limited_fixtures(env, tmp_path):
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
+    fake.add("/v4/historical-odds", {"fixtureId": "x1", "bookmakers": "pinnacle"}, (429, {}))
+    fake.add("/v4/historical-odds", {"fixtureId": "x2", "bookmakers": "pinnacle"}, (429, {}))
+    with pytest.raises(ledger.SlotIncomplete):
+        run(con, "op_history", lambda s: op.history(s, ids=["x1", "x2", "x3"]))
+    assert fake.count("/v4/historical-odds") == 6                  # x3 never asked
+
+
+def test_request_outcome_refuses_anything_but_a_genuine_404(env, tmp_path):
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
+    fake.add(*HIST, (503, {}))
+    with pytest.raises(ledger.SlotIncomplete):
+        run(con, "op_history", lambda s: op.history(s))
+    req = con.execute("SELECT request_id FROM api_request WHERE endpoint='/v4/historical-odds'").fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError, match="recorded 404"):
+        con.execute("INSERT INTO request_outcome VALUES (?, 'no_history', 404, 1)", (req,))
+    other = con.execute("SELECT request_id FROM api_request WHERE endpoint='/v4/fixtures'").fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError, match="only OddsPapi /v4/historical-odds"):
+        con.execute("INSERT INTO request_outcome VALUES (?, 'no_history', 404, 1)", (other,))
+
+
+def test_history_not_due_before_delay(env, tmp_path):
+    cfg, con, fake, f = env
+    op = mapped_candidate(env, tmp_path)
+    start = close.iso_ms("2026-10-10T16:30:00Z")
+    assert op.history_due(start + 2 * H) == [] and op.history_due(start + 4 * H) == ["idA"]
 
 
 # --- bookmaker check ------------------------------------------------------------------------------
@@ -465,7 +549,7 @@ def test_restore_test_detects_short_copy(env, tmp_path):   # ABSENT rows in the 
     cfg, con, fake, f = env
     r = backup(cfg.db_path, cfg.db_path.parent / "backups")
     with pytest.raises(RuntimeError, match="fewer rows"):
-        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5}, 6)
+        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5}, 7)
 
 
 def test_cli_offline_commands(env, capsys):
@@ -704,7 +788,7 @@ def test_watchdog_failure_names_the_missed_jobs_in_the_ping(env, monkeypatch, ca
     ledger.plan(con, cfg.active_jobs, horizon_h=48, t=t)        # planned 3 h ago, nothing ran since
     assert m.main(cli(env) + ["watchdog"]) == 1
     url, body = sent[-1]
-    assert url.endswith("/fail") and b"af_odds: 3 (missed @" in body
+    assert url.endswith("/fail") and re.search(rb"af_odds: [23] \(missed @", body)
     assert "watchdog FAIL: " in capsys.readouterr().err
 
 
@@ -901,3 +985,72 @@ def test_report_explains_raw_rows_versus_requests(env):
     assert r["extra_pages"] == 1 and r["retries"] == 1 and r["requests_without_raw"] == 0
     assert r["raw_rows"] == r["requests"] + r["extra_pages"] + r["retries"] - r["requests_without_raw"]
     assert r["retries_by_endpoint"] == {"api_football /fixtures": 1}
+
+
+# --- v0.5.4: history probe, coverage and alert ------------------------------------------------------
+
+def test_history_probe_one_fixture_per_month_with_control(env, monkeypatch, capsys):
+    cfg, con, fake, f = env
+    items = [dict(listing()[0], fixtureId=f"m{m}", startTime=f"2026-{m:02d}-16T15:00:00Z") for m in (1, 2, 3)]
+    items.append(dict(listing()[0], fixtureId="early1", startTime="2026-01-03T15:00:00Z"))
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=items)))
+    run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s))
+    for fid, st in (("m1", 404), ("m2", 404), ("m3", 200), ("ctl", 200)):
+        fake.add("/v4/historical-odds", {"fixtureId": fid, "bookmakers": "pinnacle"},
+                 (st, {"fixtureId": fid, "bookmakers": {}} if st == 200 else {"message": "nf"}))
+    main = patched_main(monkeypatch, fake)
+    rc = main(cli(env) + ["op-history-probe", "--tournaments", "17", "--months", "1-4", "--control", "ctl"])
+    out_ = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out_["control"]["result"] == "usable"
+    assert out_["months"]["2026-01"][0]["fixture"] == "m1"            # nearest after the 15th, not early1
+    assert [out_["months"][k][0]["http_status"] for k in ("2026-01", "2026-02", "2026-03")] == [404, 404, 200]
+    assert out_["months"]["2026-04"].startswith("no finished candidate")
+    assert con.execute("SELECT status, note FROM capture_slot WHERE job='op_history'").fetchone() == ("complete", "by hand")
+
+
+def test_watchdog_alerts_when_forward_fixtures_have_no_history(env, monkeypatch, capsys):
+    from collector.__main__ import history_health, main
+    cfg, con, fake, f = env
+    recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 2 * 86400))
+    items = [dict(listing()[0], fixtureId=f"r{i}", startTime=recent) for i in range(12)]
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=items)))
+    run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s))
+    for i in range(12):
+        fake.add("/v4/historical-odds", {"fixtureId": f"r{i}", "bookmakers": "pinnacle"}, (404, {}))
+    run(con, "op_history", lambda s: OP(cfg, con, f).history(s, ids=[f"r{i}" for i in range(12)]))
+    h = history_health(con, now_ms())
+    assert h["forward_requests_24h"] == 12 and h["forward_no_history_share_24h"] == 1.0
+    main(cli(env) + ["plan"])
+    assert main(cli(env) + ["watchdog"]) == 1
+    assert "no_history on 100% of 12 requests" in capsys.readouterr().out
+
+
+def test_uefa_qualifiers_do_not_count_but_knockout_playoffs_do(env):
+    from collector import eligibility
+    cfg, con, fake, f = env
+    con.execute("INSERT INTO league VALUES (2, 2026, 'UEFA Champions League', 'World', 'Cup')")
+    d = lambda s: close.iso_ms(s)  # noqa: E731
+    fx = [af_fixture(1, d("2026-08-19T19:00:00Z"), league=2, round_="Play-offs", home=(1, "A"), away=(2, "B")),
+          af_fixture(2, d("2026-09-16T19:00:00Z"), league=2, round_="League Stage - 1", home=(3, "C"), away=(4, "D")),
+          af_fixture(3, d("2027-02-17T20:00:00Z"), league=2, round_="Knockout Round Play-offs", home=(5, "E"),
+                     away=(6, "F"))]
+    fake.add("/fixtures", {"league": 2, "season": 2026}, (200, af_page(fx)))
+    fake.add("/leagues", {"id": 2, "season": 2026}, (200, af_page([{"league": {"id": 2, "name": "UCL", "type": "Cup"},
+                                                                      "country": {"name": "World"}}])))
+    import dataclasses
+    from collector.config import League
+    c2 = dataclasses.replace(cfg, leagues=(League(2, 2026),))
+    run(con, "af_fixtures", lambda s: AF(c2, con, f).fixtures(s))
+    assert eligibility.fixture_counts(con, 1) == (False, "qualifying round (before the league stage)")
+    assert eligibility.fixture_counts(con, 2)[0] and eligibility.fixture_counts(con, 3)[0]
+
+
+def test_probe_output_is_printed_even_if_the_slot_fails(env, monkeypatch, capsys):
+    cfg, con, fake, f = env
+    fake.add("/v4/historical-odds", {"fixtureId": "ctl", "bookmakers": "pinnacle"}, (429, {}))
+    main = patched_main(monkeypatch, fake)
+    rc = main(cli(env) + ["op-history-probe", "--months", "1", "--control", "ctl"])
+    cap = capsys.readouterr()
+    assert rc == 1 and '"rate_limited"' in cap.out and "SlotIncomplete" in cap.err

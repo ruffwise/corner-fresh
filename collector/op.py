@@ -25,6 +25,7 @@ COOLDOWN_S = {  # documented cooldowns plus a 20% margin
     "/v4/markets": 1.2, "/v4/bookmakers": 1.2, "/v4/account": 1.2,
 }
 FINISHED_STATUS_KEYS = {"2"}   # OddsPapi statusId 2 = finished (per GET fixtures docs)
+HISTORY_FROM_MS = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)   # documented start of history
 
 
 def iso_ms(s: str) -> int:
@@ -64,24 +65,35 @@ class OP:
         self.cfg, self.con, self.f = cfg, con, fetcher
 
     # --- transport -----------------------------------------------------------------------
-    def _get(self, slot: Slot, endpoint: str, params: dict, basis: str, attempts: int = 1) -> Result | None:
+    def _call(self, slot: Slot, endpoint: str, params: dict, basis: str, attempts: int = 1,
+              terminal: tuple[int, ...] = ()) -> tuple[Result | None, int, int | None]:
+        """One logical request: (usable result or None, request_id, last HTTP status).
+
+        Retries only what can succeed on retry: 429 (with exponential back-off on top
+        of the endpoint pacing), 5xx and network errors. A status in `terminal` (404
+        for history) is a definite answer and is never retried.
+        """
         slot.expect(1, basis)
         req_id = self.f.request_row(slot.slot_id, PROVIDER, endpoint, params)
         res = None
+        pause = COOLDOWN_S.get(endpoint, 2.4)
         for attempt in range(1, attempts + 1):
-            self.f.pace(PROVIDER + endpoint, COOLDOWN_S.get(endpoint, 2.4))
+            self.f.pace(PROVIDER + endpoint, pause)
             res = self.f.get(request_id=req_id, provider=PROVIDER, paged=False, url=self.cfg.op_base + endpoint,
                              params=params, secret_params={"apiKey": self.cfg.op_key}, attempt=attempt)
-            if res.usable:
+            if res.usable or res.status in terminal:
                 break
-            if res.status == 429:
-                self.f.sleep(COOLDOWN_S.get(endpoint, 2.4) * 2)
+            if res.status == 429 and attempt < attempts:
+                self.f.sleep(pause * 2 ** attempt)          # 12 s, then 24 s
         if res is not None and res.usable:
             self.con.execute("UPDATE api_request SET expected_pages=1 WHERE request_id=?", (req_id,))
             self.con.execute("UPDATE api_request SET status='complete' WHERE request_id=?", (req_id,))
-            return res
+            return res, req_id, res.status
         self.con.execute("UPDATE api_request SET status='failed' WHERE request_id=?", (req_id,))
-        return None
+        return None, req_id, (res.status if res is not None else None)
+
+    def _get(self, slot: Slot, endpoint: str, params: dict, basis: str, attempts: int = 1) -> Result | None:
+        return self._call(slot, endpoint, params, basis, attempts)[0]
 
     # --- quota ----------------------------------------------------------------------------
     def account(self, slot: Slot) -> dict:
@@ -180,29 +192,114 @@ class OP:
         return n
 
     # --- history (free) ----------------------------------------------------------------------------
+    def _history_params(self, fid: str) -> dict:
+        return {"fixtureId": fid, "bookmakers": self.cfg.op_bookmakers}
+
     def history_due(self, t: int) -> list[str]:
-        """Latest candidate row per provider fixture id; due once its start is old enough
-        and no usable history response exists for it yet."""
+        """MAPPED fixtures only (a live, non-revoked provider_fixture_map row): history for
+        a fixture we can't join to an api-football fixture and outcome is unusable, so it
+        is never fetched. Due once the start is op_history_delay_h old, while there is no
+        usable history response, and unless it is settled as no_history: a 404 is asked
+        again only after op_history_404_recheck_h, and never after op_history_404_max."""
         cutoff = t - int(self.cfg.op_history_delay_h * 3_600_000)
+        recheck = t - int(self.cfg.op_history_404_recheck_h * 3_600_000)
         rows = self.con.execute(
             "WITH latest AS (SELECT provider_fixture_id, start_ms, status_key,"
             "  row_number() OVER (PARTITION BY provider_fixture_id ORDER BY raw_id DESC) AS rn"
-            "  FROM provider_fixture_candidate WHERE provider = ?)"
-            " SELECT provider_fixture_id FROM latest WHERE rn = 1 AND start_ms <= ? AND start_ms >= ?"
-            " AND coalesce(status_key, '') <> '3'"
+            "  FROM provider_fixture_candidate WHERE provider = ?),"
+            " nohist AS (SELECT a.params_canonical AS p, count(*) AS n, max(o.decided_at_ms) AS last_ms"
+            "  FROM request_outcome o JOIN api_request a ON a.request_id = o.request_id"
+            "  WHERE a.provider = ? AND a.endpoint = '/v4/historical-odds' GROUP BY a.params_canonical)"
+            " SELECT l.provider_fixture_id FROM latest l"
+            " JOIN provider_fixture_map m ON m.provider = ? AND m.provider_fixture_id = l.provider_fixture_id"
+            "  AND m.revoked = 0"
+            " LEFT JOIN nohist h ON h.p = 'bookmakers=' || ? || '&fixtureId=' || l.provider_fixture_id"
+            " WHERE l.rn = 1 AND l.start_ms <= ? AND l.start_ms >= ?"
+            " AND coalesce(l.status_key, '') <> '3'"
+            " AND (h.n IS NULL OR (h.n < ? AND h.last_ms <= ?))"
             " AND NOT EXISTS (SELECT 1 FROM raw_response r JOIN api_request a ON a.request_id = r.request_id"
             "   WHERE a.provider = ? AND a.endpoint = '/v4/historical-odds' AND r.usable = 1"
-            "     AND a.params_canonical = 'bookmakers=' || ? || '&fixtureId=' || latest.provider_fixture_id)"
-            " ORDER BY start_ms LIMIT ?",
-            (PROVIDER, cutoff, int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
-             PROVIDER, self.cfg.op_bookmakers, self.cfg.op_history_max_per_run)).fetchall()
+            "     AND a.params_canonical = 'bookmakers=' || ? || '&fixtureId=' || l.provider_fixture_id)"
+            " ORDER BY l.start_ms LIMIT ?",
+            (PROVIDER, PROVIDER, PROVIDER, self.cfg.op_bookmakers, cutoff, HISTORY_FROM_MS,
+             self.cfg.op_history_404_max, recheck, PROVIDER, self.cfg.op_bookmakers,
+             self.cfg.op_history_max_per_run)).fetchall()
         return [r[0] for r in rows]
 
+    def history_one(self, slot: Slot, fid: str, basis: str) -> str:
+        """Fetch one fixture's history. Returns 'usable', 'no_history' (a 404, recorded in
+        request_outcome so the slot can still complete) or 'failed' (transport failure:
+        429 after back-off, 5xx, network; fails the slot)."""
+        res, req_id, status = self._call(slot, "/v4/historical-odds", self._history_params(fid), basis,
+                                         attempts=3, terminal=(404,))
+        if res is not None:
+            return "usable"
+        if status == 404:
+            self.con.execute("INSERT INTO request_outcome VALUES (?, 'no_history', 404, ?)", (req_id, now_ms()))
+            return "no_history"
+        return "rate_limited" if status == 429 else "failed"
+
     def history(self, slot: Slot, ids: list[str] | None = None) -> dict:
+        """Settled per fixture. Stops early after 2 consecutive fixtures that stayed
+        rate-limited through back-off: the rest stay due for the next run."""
         ids = self.history_due(now_ms()) if ids is None else ids
-        ok = 0
+        counts = {"usable": 0, "no_history": 0, "rate_limited": 0, "failed": 0}
+        streak = 0
+        done = 0
         for fid in ids:
-            res = self._get(slot, "/v4/historical-odds", {"fixtureId": fid, "bookmakers": self.cfg.op_bookmakers},
-                            f"history {fid} (free)", attempts=3)
-            ok += res is not None
-        return {"requested": len(ids), "usable": ok}
+            r = self.history_one(slot, fid, f"history {fid} (free)")
+            counts[r] += 1
+            done += 1
+            streak = streak + 1 if r == "rate_limited" else 0
+            if streak >= 2:
+                break
+        return {"requested": done, "due": len(ids), "stopped_early_on_429": streak >= 2, **counts}
+
+    def history_probe(self, slot: Slot, tournaments: list[int], year: int, months: list[int],
+                      control: str | None, t: int) -> dict:
+        """One-off diagnostic of the real history window (free endpoint, 6 s pacing).
+        Per month and tournament: the finished candidate fixture whose start is nearest
+        after the 15th, at least 24 h ago. Months with no such fixture in the requested
+        tournaments fall back to any configured tournament. Mapping is NOT required:
+        this asks what the vendor has, not what we can use."""
+        out = {"control": None, "months": {}}
+        if control:
+            out["control"] = {"fixture": control, "result": self.history_one(slot, control, f"probe control {control}")}
+        all_t = [lg.oddspapi_tournament_id for lg in self.cfg.leagues if lg.oddspapi_tournament_id]
+        for mth in months:
+            lo = int(datetime(year, mth, 1, tzinfo=timezone.utc).timestamp() * 1000)
+            hi = int(datetime(year + (mth == 12), mth % 12 + 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+            mid = int(datetime(year, mth, 15, tzinfo=timezone.utc).timestamp() * 1000)
+            rows = []
+            for tid in tournaments:
+                c = self._probe_pick(tid, lo, hi, mid, t)
+                if c:
+                    rows.append((tid, c))
+            if not rows:
+                for tid in all_t:
+                    c = self._probe_pick(tid, lo, hi, mid, t)
+                    if c:
+                        rows.append((tid, c))
+                        break
+            res = []
+            for tid, (fid, start, home, away) in rows:
+                r = self.history_one(slot, fid, f"probe {year}-{mth:02d} t{tid} {fid}")
+                st = self.con.execute(
+                    "SELECT r.http_status FROM raw_response r JOIN api_request a ON a.request_id = r.request_id"
+                    " WHERE a.slot_id = ? AND a.params_canonical = ? ORDER BY r.raw_id DESC LIMIT 1",
+                    (slot.slot_id, f"bookmakers={self.cfg.op_bookmakers}&fixtureId={fid}")).fetchone()
+                res.append({"tournament": tid, "fixture": fid, "match": f"{home} v {away}",
+                            "start_utc": datetime.fromtimestamp(start / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                            "http_status": st[0] if st else None, "result": r})
+            out["months"][f"{year}-{mth:02d}"] = res or "no finished candidate in any configured tournament"
+        return out
+
+    def _probe_pick(self, tid: int, lo: int, hi: int, mid: int, t: int):
+        return self.con.execute(
+            "WITH latest AS (SELECT provider_fixture_id, start_ms, status_key, home_team_name, away_team_name,"
+            "  tournament_key, row_number() OVER (PARTITION BY provider_fixture_id ORDER BY raw_id DESC) AS rn"
+            "  FROM provider_fixture_candidate WHERE provider = ?)"
+            " SELECT provider_fixture_id, start_ms, home_team_name, away_team_name FROM latest"
+            " WHERE rn = 1 AND tournament_key = ? AND status_key = '2' AND start_ms >= ? AND start_ms < ?"
+            " AND start_ms <= ? ORDER BY (start_ms < ?), abs(start_ms - ?) LIMIT 1",
+            (PROVIDER, str(tid), lo, hi, t - 86_400_000, mid, mid)).fetchone()

@@ -39,7 +39,9 @@ class Config:
     op_fixtures_refresh_days: int = 28
     op_fixtures_from: str | None = None       # e.g. "2026-01-01T00:00:00Z" for the one-off backfill listing
     op_history_delay_h: float = 3.0           # pull history this long after scheduled kickoff
-    op_history_max_per_run: int = 60          # ~5 minutes at the 5 s cooldown
+    op_history_max_per_run: int = 60          # ~6 minutes at the 6 s pacing
+    op_history_404_recheck_h: float = 24.0    # a fixture that returned 404 is asked once more after this long
+    op_history_404_max: int = 2               # ...and is terminal (no_history) after this many 404s
     healthchecks: dict[str, str] = field(default_factory=dict)
     active_jobs: tuple[str, ...] = ()
 
@@ -86,6 +88,8 @@ def load(path: str | Path) -> Config:
         op_fixtures_from=op.get("fixtures_from"),
         op_history_delay_h=float(op.get("history_delay_h", 3.0)),
         op_history_max_per_run=int(op.get("history_max_per_run", 60)),
+        op_history_404_recheck_h=float(op.get("history_404_recheck_h", 24.0)),
+        op_history_404_max=int(op.get("history_404_max", 2)),
         healthchecks=hc,
         active_jobs=tuple(j for j in SCHEDULED_JOBS if j in active),
     )
