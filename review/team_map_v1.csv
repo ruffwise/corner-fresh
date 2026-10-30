@@ -1,0 +1,187 @@
+provider,provider_team_key,provider_team_name,team_id,af_team_name,supporting_fixtures,via_kickoff,via_opponent,conflicts,decision
+oddspapi,2671,1. FC Cologne,192,1. FC Köln,18,18,0,,accept
+oddspapi,5885,1. FC Heidenheim,180,1. FC Heidenheim,5,5,0,,accept
+oddspapi,2692,AC Milan,489,AC Milan,28,28,0,Atalanta(1); Bologna(1); Pisa(1); Lecce(1),accept
+oddspapi,2729,AC Monza,1579,Monza,5,5,0,Juventus(1),accept
+oddspapi,3395,AC Omonia Nicosia,3402,Omonia Nicosia,2,2,0,,accept
+oddspapi,2693,ACF Fiorentina,502,Fiorentina,27,27,0,Venezia(1),accept
+oddspapi,60,AFC Bournemouth,35,Bournemouth,11,11,0,,accept
+oddspapi,1291,AGF Aarhus,406,Aarhus,4,4,0,,accept
+oddspapi,1646,AJ Auxerre,108,Auxerre,18,18,0,,accept
+oddspapi,1653,AS Monaco,91,Monaco,27,27,0,,accept
+oddspapi,2702,AS Roma,497,AS Roma,29,29,0,,accept
+oddspapi,1678,AS Saint-Etienne,1063,Saint Etienne,2,2,0,,accept
+oddspapi,1684,Angers SCO,77,Angers,15,15,0,Le Mans(1),accept
+oddspapi,42,Arsenal FC,42,Arsenal,28,28,0,,accept
+oddspapi,40,Aston Villa,66,Aston Villa,17,17,0,,accept
+oddspapi,2686,Atalanta BC,499,Atalanta,28,28,0,,accept
+oddspapi,38989,Atert Bissen,15847,Atert Bissen,1,1,0,,accept
+oddspapi,2825,Athletic Bilbao,531,Athletic Club,27,27,0,Racing Santander(1),accept
+oddspapi,2836,Atletico Madrid,530,Atletico Madrid,33,33,0,,accept
+oddspapi,2681,Bayer Leverkusen,168,Bayer Leverkusen,10,10,0,,accept
+oddspapi,2672,Bayern Munich,157,Bayern München,19,19,0,,accept
+oddspapi,9,Birmingham City,54,Birmingham,6,6,0,,accept
+oddspapi,46,Blackburn Rovers,67,Blackburn,6,6,0,,accept
+oddspapi,656,Bodoe/Glimt,327,Bodo/Glimt,2,2,0,,accept
+oddspapi,2685,Bologna FC,500,Bologna,23,23,0,AC Milan(1); Como(1),accept
+oddspapi,5,Bolton Wanderers,68,Bolton,5,5,0,,accept
+oddspapi,2673,Borussia Dortmund,165,Borussia Dortmund,19,19,0,,accept
+oddspapi,2527,Borussia Monchengladbach,163,Borussia Mönchengladbach,13,13,0,,accept
+oddspapi,50,Brentford FC,55,Brentford,10,10,0,,accept
+oddspapi,30,Brighton & Hove Albion,51,Brighton,8,8,0,,accept
+oddspapi,58,Bristol City,56,Bristol City,3,3,0,,accept
+oddspapi,6,Burnley FC,44,Burnley,10,10,0,,accept
+oddspapi,2820,CA Osasuna,727,Osasuna,27,27,0,,accept
+oddspapi,116223,CS Universitatea Craiova,632,Universitatea Craiova,3,3,0,,accept
+oddspapi,2719,Cagliari Calcio,490,Cagliari,21,21,0,Como(1),accept
+oddspapi,61,Cardiff City,43,Cardiff,2,2,0,,accept
+oddspapi,47,Charlton Athletic,1335,Charlton,3,3,0,,accept
+oddspapi,38,Chelsea FC,49,Chelsea,19,19,0,,accept
+oddspapi,2888,Club Brugge,569,Club Brugge KV,2,2,0,,accept
+oddspapi,2704,Como 1907,895,Como,25,25,0,Udinese(1),accept
+oddspapi,11,Coventry City,1346,Coventry,14,14,0,,accept
+oddspapi,7,Crystal Palace,52,Crystal Palace,8,8,0,Burnley(1),accept
+oddspapi,2885,Deportivo Alaves,542,Alaves,27,27,0,,accept
+oddspapi,27,Derby County,69,Derby,5,5,0,,accept
+oddspapi,1652,ESTAC Troyes,110,Estac Troyes,9,9,0,,accept
+oddspapi,2674,Eintracht Frankfurt,169,Eintracht Frankfurt,16,16,0,,accept
+oddspapi,2846,Elche CF,797,Elche,31,31,0,,accept
+oddspapi,2814,Espanyol Barcelona,540,Espanyol,30,30,0,,accept
+oddspapi,48,Everton FC,45,Everton,14,14,0,,accept
+oddspapi,2600,FC Augsburg,170,FC Augsburg,11,11,0,,accept
+oddspapi,2817,FC Barcelona,529,Barcelona,31,31,0,,accept
+oddspapi,277835,FC Drita,14281,Drita,1,1,0,,accept
+oddspapi,116312,FC Iberia 1999,3502,FC Iberia 1999,2,2,0,,accept
+oddspapi,5172,FC Kairat Almaty,664,Kairat Almaty,6,6,0,,accept
+oddspapi,1656,FC Lorient,97,Lorient,16,16,0,Estac Troyes(1),accept
+oddspapi,1651,FC Metz,112,Metz,6,6,0,,accept
+oddspapi,1647,FC Nantes,83,Nantes,11,11,0,,accept
+oddspapi,5173,FC Sheriff Tiraspol,568,Sheriff Tiraspol,1,1,0,,accept
+oddspapi,2442,FC St. Gallen 1879,1011,FC ST. Gallen,1,1,0,,accept
+oddspapi,2526,FC St. Pauli,186,FC St. Pauli,10,10,0,,accept
+oddspapi,2454,FC Thun,1012,FC Thun,1,1,0,,accept
+oddspapi,80741,FK Kauno Zalgiris,3872,Kauno Žalgiris,3,3,0,,accept
+oddspapi,6224,FK Sutjeska Niksic,673,Sutjeska,1,1,0,,accept
+oddspapi,5403,FK Vardar Skopje,574,Vardar Skopje,2,2,0,,accept
+oddspapi,2556,FSV Mainz,164,FSV Mainz 05,11,11,0,,accept
+oddspapi,3052,Fenerbahce Istanbul,611,Fenerbahçe,1,1,0,,accept
+oddspapi,1925,Ferencvarosi Budapest,651,Ferencvarosi TC,2,2,0,,accept
+oddspapi,33584,Floriana FC,4625,Floriana,1,1,0,,accept
+oddspapi,2801,Frosinone Calcio,512,Frosinone,4,4,0,Udinese(1),accept
+oddspapi,43,Fulham FC,36,Fulham,9,9,0,,accept
+oddspapi,2032,GNK Dinamo Zagreb,620,Dinamo Zagreb,1,1,0,,accept
+oddspapi,3061,Galatasaray Istanbul,645,Galatasaray,2,2,0,,accept
+oddspapi,2713,Genoa CFC,495,Genoa,20,20,0,Frosinone(1); Como(1),accept
+oddspapi,2859,Getafe CF,546,Getafe,29,29,0,,accept
+oddspapi,24264,Girona FC,547,Girona,15,15,0,,accept
+oddspapi,3110,Gornik Zabrze,340,Gornik Zabrze,1,1,0,,accept
+oddspapi,2036,HNK Hajduk Split,608,HNK Hajduk Split,1,1,0,,accept
+oddspapi,2676,Hamburger SV,175,Hamburger SV,16,16,0,,accept
+oddspapi,5202,Hapoel Be`er Sheva FC,563,Hapoel Beer Sheva,1,1,0,,accept
+oddspapi,2353,Heart of Midlothian FC,254,Heart Of Midlothian,1,1,0,,accept
+oddspapi,2701,Hellas Verona,504,Hellas Verona,16,16,0,,accept
+oddspapi,96,Hull City,64,Hull City,10,10,0,,accept
+oddspapi,256267,IF Vestri,4165,Vestri,2,2,0,,accept
+oddspapi,2697,Inter Milano,505,Inter,30,30,0,,accept
+oddspapi,32,Ipswich Town,57,Ipswich,7,7,0,,accept
+oddspapi,2687,Juventus Turin,496,Juventus,29,29,0,Sassuolo(1),accept
+oddspapi,372056,KF Egnatia Rrogozhine,3327,Egnatia Rrogozhinë,1,1,0,,accept
+oddspapi,5194,KI Klaksvik,701,KI Klaksvik,3,3,0,,accept
+oddspapi,3121,KKS Lech Poznan,347,Lech Poznan,3,3,0,,accept
+oddspapi,2244,Kuopion Palloseura,1165,KuPS,4,4,0,,accept
+oddspapi,5184,Larne FC,5354,Larne,1,1,0,,accept
+oddspapi,2699,Lazio Rome,487,Lazio,26,26,0,,accept
+oddspapi,1662,Le Havre AC,111,Le Havre,10,10,0,,accept
+oddspapi,1672,Le Mans FC,1298,Le Mans,6,6,0,,accept
+oddspapi,34,Leeds United,63,Leeds,15,15,0,,accept
+oddspapi,31,Leicester City,46,Leicester,3,3,0,,accept
+oddspapi,2849,Levante UD,539,Levante,27,27,0,Barcelona(1),accept
+oddspapi,1643,Lille OSC,79,Lille,25,25,0,,accept
+oddspapi,92,Lincoln City,1379,Lincoln,1,1,0,,accept
+oddspapi,126304,Lincoln Red Imps,667,Lincoln Red Imps FC,1,1,0,,accept
+oddspapi,44,Liverpool FC,40,Liverpool,22,22,0,,accept
+oddspapi,5198,Maccabi Tel Aviv FC,604,Maccabi Tel Aviv,2,2,0,,accept
+oddspapi,2830,Malaga CF,535,Malaga,11,11,0,,accept
+oddspapi,17,Manchester City,50,Manchester City,25,25,0,Fulham(1),accept
+oddspapi,35,Manchester United,33,Manchester United,25,25,0,,accept
+oddspapi,791232,Maxline Vitebsk,7808,ML Vitebsk,1,1,0,,accept
+oddspapi,36,Middlesbrough FC,70,Middlesbrough,13,13,0,,accept
+oddspapi,25,Millwall FC,58,Millwall,9,9,0,,accept
+oddspapi,1783,Mjallby AIF,2240,Mjallby AIF,1,1,0,,accept
+oddspapi,2962,NEC Nijmegen,413,NEC Nijmegen,1,1,0,,accept
+oddspapi,2413,NK Celje,4360,Celje,1,1,0,,accept
+oddspapi,39,Newcastle United,34,Newcastle,21,21,0,,accept
+oddspapi,263,Norwich City,71,Norwich,5,5,0,,accept
+oddspapi,14,Nottingham Forest,65,Nottingham Forest,14,14,0,,accept
+oddspapi,1661,OGC Nice,84,Nice,21,21,0,,accept
+oddspapi,3245,Olympiacos Piraeus,553,Olympiakos Piraeus,1,1,0,,accept
+oddspapi,1649,Olympique Lyon,80,Lyon,28,28,0,Estac Troyes(1),accept
+oddspapi,1641,Olympique Marseille,81,Marseille,34,34,0,,accept
+oddspapi,95,Oxford United,1338,Oxford United,2,2,0,,accept
+oddspapi,3275,PFC CSKA Sofia,853,CSKA Sofia,2,2,0,,accept
+oddspapi,3273,PFC Levski Sofia,646,Levski Sofia,2,2,0,,accept
+oddspapi,171626,Pafos FC,3403,Pafos,1,1,0,,accept
+oddspapi,6070,Paris FC,114,Paris FC,18,18,0,,accept
+oddspapi,1644,Paris Saint-Germain,85,Paris Saint Germain,36,36,0,Rennes(1),accept
+oddspapi,2690,Parma Calcio,523,Parma,23,23,0,,accept
+oddspapi,2737,Pisa SC,801,Pisa,16,16,0,,accept
+oddspapi,2,Portsmouth FC,1355,Portsmouth,6,6,0,,accept
+oddspapi,21,Preston North End,59,Preston,5,5,0,,accept
+oddspapi,5962,Qarabag FK,556,Qarabag,4,4,0,,accept
+oddspapi,1,Queens Park Rangers,72,QPR,3,3,0,,accept
+oddspapi,36360,RB Leipzig,173,RB Leipzig,15,15,0,,accept
+oddspapi,2821,RC Celta de Vigo,538,Celta Vigo,31,31,0,,accept
+oddspapi,2832,RC Deportivo de A Coruna,544,Deportivo La Coruna,10,10,0,,accept
+oddspapi,2826,RCD Mallorca,798,Mallorca,16,16,0,,accept
+oddspapi,2900,RSC Anderlecht,554,Anderlecht,1,1,0,,accept
+oddspapi,1648,Racing Club De Lens,116,Lens,29,29,0,,accept
+oddspapi,2835,Racing Santander,4665,Racing Santander,12,12,0,,accept
+oddspapi,2818,Rayo Vallecano,728,Rayo Vallecano,31,31,0,,accept
+oddspapi,2816,Real Betis Seville,543,Real Betis,31,31,0,,accept
+oddspapi,2829,Real Madrid,541,Real Madrid,29,29,0,,accept
+oddspapi,2851,Real Oviedo,718,Oviedo,17,17,0,,accept
+oddspapi,2824,Real Sociedad San Sebastian,548,Real Sociedad,31,31,0,,accept
+oddspapi,2999,SC Braga,217,SC Braga,2,2,0,,accept
+oddspapi,2538,SC Freiburg,160,SC Freiburg,20,20,0,,accept
+oddspapi,2561,SC Paderborn 07,185,SC Paderborn 07,3,3,0,,accept
+oddspapi,2051,SK Sturm Graz,637,Sturm Graz,1,1,0,,accept
+oddspapi,3006,SL Benfica,211,Benfica,3,3,0,,accept
+oddspapi,2714,SSC Napoli,492,Napoli,30,30,0,,accept
+oddspapi,2598,SV 07 Elversberg,1660,SV Elversberg,3,3,0,,accept
+oddspapi,382568,Sabah Masazir,13976,Sabah FA,3,3,0,,accept
+oddspapi,2793,Sassuolo Calcio,488,Sassuolo,26,26,0,AC Milan(1),accept
+oddspapi,2530,Schalke 04,174,FC Schalke 04,7,7,0,,accept
+oddspapi,2833,Sevilla FC,536,Sevilla,28,28,0,,accept
+oddspapi,3177,Shamrock Rovers,652,Shamrock Rovers,1,1,0,,accept
+oddspapi,15,Sheffield United,62,Sheffield Utd,9,9,0,,accept
+oddspapi,12,Sheffield Wednesday,74,Sheffield Wednesday,2,2,0,,accept
+oddspapi,45,Southampton FC,41,Southampton,11,11,0,,accept
+oddspapi,2218,Sparta Prague,628,Sparta Praha,1,1,0,,accept
+oddspapi,3001,Sporting CP,228,Sporting CP,1,1,0,,accept
+oddspapi,1715,Stade Brest 29,106,Stade Brestois 29,17,17,0,Le Mans(1),accept
+oddspapi,1658,Stade Rennais FC,94,Rennes,23,23,0,Paris Saint Germain(1),accept
+oddspapi,29,Stoke City,75,Stoke City,2,2,0,,accept
+oddspapi,1659,Strasbourg Alsace,95,Strasbourg,25,25,0,,accept
+oddspapi,41,Sunderland AFC,746,Sunderland,9,9,0,,accept
+oddspapi,74,Swansea City,76,Swansea,7,7,0,,accept
+oddspapi,2569,TSG Hoffenheim,167,1899 Hoffenheim,9,9,0,,accept
+oddspapi,3346,Tallinna FC Flora,687,Flora Tallinn,1,1,0,,accept
+oddspapi,2696,Torino FC,503,Torino,22,22,0,,accept
+oddspapi,33,Tottenham Hotspur,47,Tottenham,19,19,0,,accept
+oddspapi,1681,Toulouse FC,96,Toulouse,18,18,0,,accept
+oddspapi,2761,US Cremonese,520,Cremonese,16,16,0,Pisa(1),accept
+oddspapi,2689,US Lecce,867,Lecce,28,28,0,,accept
+oddspapi,2695,Udinese Calcio,494,Udinese,25,25,0,Frosinone(1),accept
+oddspapi,2547,Union Berlin,182,Union Berlin,13,13,0,,accept
+oddspapi,2524,VFL Wolfsburg,161,VfL Wolfsburg,9,9,0,,accept
+oddspapi,2828,Valencia CF,532,Valencia,30,30,0,,accept
+oddspapi,2688,Venezia FC,517,Venezia,7,7,0,Genoa(1),accept
+oddspapi,2677,VfB Stuttgart,172,VfB Stuttgart,21,21,0,,accept
+oddspapi,1908,Vikingur Reykjavik,278,Vikingur Reykjavik,1,1,0,,accept
+oddspapi,2819,Villarreal CF,533,Villarreal,30,30,0,,accept
+oddspapi,24,Watford FC,38,Watford,4,4,0,,accept
+oddspapi,2534,Werder Bremen,162,Werder Bremen,12,12,0,,accept
+oddspapi,8,West Bromwich Albion,60,West Brom,7,7,0,,accept
+oddspapi,37,West Ham United,48,West Ham,15,15,0,,accept
+oddspapi,3,Wolverhampton Wanderers,39,Wolves,13,13,0,,accept
+oddspapi,64,Wrexham AFC,1837,Wrexham,13,13,0,,accept
