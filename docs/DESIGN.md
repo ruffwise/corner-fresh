@@ -1,4 +1,4 @@
-# Pinnacle-Close Benchmark Study — Design v0.5.5
+# Pinnacle-Close Benchmark Study — Design v0.5.6
 
 **Status.** Draft for review. Supersedes v0.4. When accepted, commit it as part of `prereg-0`, then sign and timestamp it (§13).
 **Date.** 2026-10-30.
@@ -9,7 +9,7 @@
 - `db/migrations/006_v051.sql` (to v6) and `007_v054.sql` (to v7: settled `no_history` outcomes)
 - `collector/` and `deploy/`, plus `RUNBOOK.md` (v0.5.4)
 - `analysis/prereg_tests.py`: the two confirmatory tests of §1, for any number of outcomes
-- `tests/`: 273 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
+- `tests/`: 287 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
 - `analysis/power.py` and its output `analysis/power_output.md`
 
 Every number in this document comes from `analysis/power.py` unless a source is cited.
@@ -19,6 +19,12 @@ Every number in this document comes from `analysis/power.py` unless a source is 
 ---
 
 ## 0. Status, and what changed in v0.5 to v0.5.4
+
+**Status (30 Oct, evening).**
+- v0.5.5 deployed (5697448): for the first time the release output matched the runbook. It showed the deploy-script line, the six `job:` lines, the timer table and the `plan` output.
+- A11 step 1 (`map-propose`): 188 proposed pairs. Every team of the six domestic leagues, both seasons, maps correctly.
+- Two placeholder participants were proposed ("Winner Match 2", "Winner Match 3"); they are now excluded (C28).
+- UEFA league stage: 9 of 36 UCL and 11 of 36 UEL clubs had no proposal, because 9 fixtures share each kickoff. Opponent propagation (C27) covers them. op_history and op_fixtures stay inactive until it does.
 
 **Status (30 Oct, afternoon).**
 - v0.5.4 deployed (live 2f969b5, schema v7; backup `…-pre-migrate-v6.db.gz`, restore test ok). `sync-timers.sh` run on its own: all six timers match `active_jobs`.
@@ -81,6 +87,15 @@ OddsPapi steps (A10–A11) follow the v0.5.3 deploy.
 | C24 | **`op-backfill --max` is the real cap** (it was silently limited to the hourly job's 60) | v0.5 `op-backfill` |
 | C25 | **The confirmatory tests for any K** (`analysis/prereg_tests.py`), with 1X2 scored on all three outcomes (§1) | §1's binary-only wording |
 | C26 | **G0.5a treatment of settled no_history** (§6) and the measured start of history (`eligibility.history_window_start_ms`) | — |
+
+**v0.5.6 changes** (no schema change):
+
+| # | Change | Supersedes |
+|---|---|---|
+| C27 | **Opponent propagation in `map-propose`** (§5): with simultaneous kickoffs, a participant whose opponent is already **approved** is pinned to the one fixture with that team on the same side. Only approved pairs propagate, so each round rests on reviewed mappings | Kickoff-only proposals, which can't separate 9 simultaneous UEFA fixtures |
+| C28 | **Placeholder participants** ("Winner Match 2" and the like) are never proposed, and the loader refuses them | Reliance on the reviewer |
+| C29 | **A `decision` column**: `accept`, or `REVIEW: <why>` for undominated conflicts, a team already approved for another key, or one team proposed for two keys. The loader takes only `accept` rows; identical already-loaded rows are skipped, so a cumulative CSV can be reloaded; a changed pair is refused | Loader refusing any non-empty `conflicts` cell |
+| C30 | **Root-run deploy files need your confirmation when they change** (§13): `release.sh` shows the diff of `deploy/` against the last approved tree and asks for `yes` at the terminal | C23's unconditional re-execution |
 
 **v0.5 changes.** Each supersedes the section named.
 
@@ -338,10 +353,22 @@ A test asserts that no `sb_` table exists, and that a bookmaker cannot be given 
 
 ### Workflow (`collector/mapping.py`)
 
-1. `map-propose` writes proposed participant → team pairs, supported by same-league fixtures with agreeing kickoffs, to a CSV. Conflicts are listed.
-2. You review the CSV and commit it.
-3. `map-load-teams` loads the approved pairs. It refuses any row that still lists conflicts.
-4. `map-apply` maps only fixtures whose two participants are both allowlisted and match exactly one api-football fixture.
+1. `map-propose` writes proposed participant → team pairs to a CSV, from two kinds of evidence in the same configured league:
+   - **kickoff:** exactly one api-football fixture kicks off within 15 minutes;
+   - **opponent** (v0.5.6): several do, because kickoffs are simultaneous (a UEFA matchday has 9), but one participant is already **approved**, and exactly one of those fixtures has that team on the same side. The other participant is proposed as the other side.
+
+   Only approved pairs propagate, never pairs proposed in the same run, so every step rests on a reviewed mapping. Each round is load, then propose again. Names are evidence for you; nothing is matched by name. Placeholder participants ("Winner Match 2", "Loser …", "TBD") are never proposed.
+2. Each row gets a `decision`:
+   - `accept`: no conflicting team, or support at least 5 times all conflicting support;
+   - `REVIEW: <why>`: weaker conflicts, a team already approved for another key, or one team proposed for two keys.
+
+   You delete wrong rows, resolve REVIEW rows, and commit the CSV.
+3. `map-load-teams` loads the CSV exactly as committed in git:
+   - all or nothing, and only `accept` rows;
+   - placeholders are refused;
+   - a row identical to an approved pair is skipped, so a cumulative file can be loaded again;
+   - a row that would change an approved pair is refused.
+4. `map-apply` maps only fixtures whose two participants are both allowlisted and match exactly one api-football fixture (teams and side, and kickoff within 15 minutes). This is unique even at simultaneous kickoffs.
 
 ### Measured mis-join rate (`v_misjoin_rate`)
 
@@ -610,6 +637,13 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 
 **Without branch protection (free private GitHub repos don't offer it).** Branch protection would only stop history being rewritten on GitHub; it isn't the evidence. The evidence is the signed tag (who fixed the content), the OpenTimestamps proof (the commit existed by time T), and the database's `effective_from` (no forecast frozen earlier counts). A rewritten `main` can't change a timestamped commit hash, and the write-enabled deploy key on the VM can push commits but can't forge your signature or backdate a proof. That is sufficient on two conditions: the signing key stays off the VM, and the `.ots` proofs are kept and verified.
 
+**What root runs at a release (v0.5.6).** Everything under `deploy/` runs as root: `release.sh`, the unit files it installs (a unit's `ExecStart` runs as root unless it names a user), `run.sh` and `sync-timers.sh`. Since C23, `release.sh` comes from `origin/main`, so whoever controls GitHub `main` would control what root runs at your next release. `azureuser` already has sudo, so the new exposure is the GitHub account.
+- **Controls:**
+  1. 2FA on the GitHub account (you're enabling it).
+  2. The server clone's checked-out commit is the last `deploy/` tree you approved. When the script to run, or the target release's `deploy/`, differs from it, `release.sh` prints the diff and the commits, and runs only after you type `yes` at the terminal. Without a terminal it refuses. The approved commit becomes the new reference.
+  3. The server clone keeps its separate read-only deploy key.
+- **What this does not cover:** a compromised GitHub account changing `collector/` code. That code runs as the unprivileged `corners` user and can damage the data, not the machine. It is visible in `git log` before each release, and the off-box copy can't be deleted from the VM.
+
 **`prereg-0` contents:**
 - this document;
 - G0.5's definitions, including §0.2 items 6–8 (main line, start sources, close-v1b and its switching rule) and §0.3 (L1, L2 inspection, 2% cap, causes);
@@ -634,7 +668,8 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 | v0.5.2: active jobs, named watchdog failures, timer drift guard; off-box copy and backup status; close-v1b, main-line rule, start-source rule, L2 inspection gate; `close-report` | **Done**; deployed 26 Oct, off-box copy and restore drill verified |
 | v0.5.3: by-hand runs get their own slots and never ping; `raw_vs_requests` in the report | **Done**; deployed 27 Oct |
 | v0.5.4: mapped-only history, settled 404s, 429 back-off, history health alert, probe, verified timer sync, family eligibility, UEFA stage rule (schema v7) | **Done**; deployed 30 Oct |
-| v0.5.5: `release.sh` runs the latest script; `op-backfill --max`; K-outcome confirmatory tests; G0.5a no_history rule | **Done.** Deploy with RUNBOOK Part X |
+| v0.5.5: `release.sh` runs the latest script; `op-backfill --max`; K-outcome confirmatory tests; G0.5a no_history rule | **Done**; deployed 30 Oct |
+| v0.5.6: opponent propagation, placeholder exclusion, `decision` column and idempotent loader; confirmation of root-run deploy changes | **Done.** Deploy with RUNBOOK Part Y |
 | Mapping tooling (propose, load from git, apply, kickoff audit, manual sample) | **Done** |
 | M6: parsers into `quote` and `price_history` with allowlists from the day-1 dumps; `price_agreement` audit | Next. Needs the day-1 dumps |
 | M7: G0.5 report, coverage ledger job, de-vig oracle test (R13), training-cutoff guard (R14) | After M6 |
@@ -664,7 +699,7 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 - History window: January to now; the January case applies (§6.1).
 - Settled `no_history` in G0.5a: unusable in the denominator from the first available history day; excluded and reported before it (§6).
 
-**Open:** none in the design. Still to come from you: W6 (the quota reading after 00:00 UTC 1 Nov) and the A8 memory peaks once op_history runs again.
+**Open:** none in the design. UEFA stays in the study: opponent propagation (§5) maps the league stage; qualifiers were already excluded (§9.1). Still to come from you: W6 (the quota reading after 00:00 UTC 1 Nov) and the A8 memory peaks once op_history runs again.
 
 ---
 

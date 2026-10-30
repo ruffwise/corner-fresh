@@ -450,11 +450,11 @@ def check_config(cfg) -> int:
 def mapping_cmd(cfg, con, a) -> int:
     if a.cmd == "map-propose":
         path = cfg.review_dir / "team_map_proposals.csv"
-        out({"proposed_rows": mapping.propose_teams(cfg, con, path), "csv": str(path),
-             "next": "review the CSV, delete wrong rows, commit it under review/, then run "
-                     "map-load-teams <commit> review/<file>.csv"})
+        out({**mapping.propose_teams(cfg, con, path), "csv": str(path),
+             "next": "review the CSV: delete wrong rows, resolve every 'REVIEW: ...' decision to 'accept' or "
+                     "delete it; commit it under review/, then run map-load-teams <commit> review/<file>.csv"})
     elif a.cmd == "map-load-teams":
-        out({"loaded": mapping.load_teams_from_git(con, cfg.repo_dir, a.commit, a.path_in_repo),
+        out({**mapping.load_teams_from_git(con, cfg.repo_dir, a.commit, a.path_in_repo),
              "from": f"{a.commit}:{a.path_in_repo}"})
     elif a.cmd == "map-apply":
         out(mapping.apply(cfg, con))

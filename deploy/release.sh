@@ -30,12 +30,33 @@ REL=$BASE/releases/$SHORT
 #    working tree: `git fetch` doesn't update that file, so it silently goes stale
 #    (it did: v0.5.2 to v0.5.4 were deployed by the b9c09f6 script). origin/main, not
 #    the target commit, so a rollback to old code still runs current deploy logic.
+#
+#    Trust boundary: everything under deploy/ runs as root (this script, the unit
+#    files it installs, run.sh, sync-timers.sh). The clone's checked-out HEAD is the
+#    last deploy/ tree you approved. If the script to run, or the target release's
+#    deploy/, differs from it, the difference is shown and you must type "yes" at the
+#    terminal (no tty: refused). The approved commit then becomes the checked-out HEAD.
 SCRIPT_SHA=$(git -C "$REPO" rev-parse --verify origin/main)
 if [ -z "${CORNERS_RELEASE_SCRIPT:-}" ]; then
+  TRUSTED=$(git -C "$REPO" rev-parse --verify HEAD)
+  if ! git -C "$REPO" diff --quiet "$TRUSTED" "$SCRIPT_SHA" -- deploy/release.sh \
+     || ! git -C "$REPO" diff --quiet "$TRUSTED" "$SHA" -- deploy/; then
+    echo "== deploy/ changed since the last approved tree (${TRUSTED:0:12}). These files run as root:"
+    git -C "$REPO" --no-pager diff --stat "$TRUSTED" "$SHA" -- deploy/
+    git -C "$REPO" --no-pager diff "$TRUSTED" "$SCRIPT_SHA" -- deploy/release.sh
+    git -C "$REPO" --no-pager diff "$TRUSTED" "$SHA" -- deploy/ ':!deploy/release.sh'
+    git -C "$REPO" --no-pager log --oneline "$TRUSTED..$SCRIPT_SHA" -- deploy/
+    { exec 3</dev/tty; } 2>/dev/null || { echo "ABORT: deploy/ changed and there is no terminal to confirm it"; exit 1; }
+    ok=""; read -r -u 3 -p "Type yes to run this as root: " ok || true
+    exec 3<&-
+    [ "$ok" = yes ] || { echo "ABORT: not confirmed"; exit 1; }
+  fi
   LATEST=$(mktemp /tmp/corners-release.XXXXXX.sh)
   git -C "$REPO" show "$SCRIPT_SHA:deploy/release.sh" > "$LATEST"
   CORNERS_RELEASE_SCRIPT=$SCRIPT_SHA exec bash "$LATEST" "$@"
 fi
+# The script now running is approved: make it the trusted tree for the next release.
+git -C "$REPO" checkout --quiet --detach "$CORNERS_RELEASE_SCRIPT"
 case "$0" in /tmp/corners-release.*.sh) rm -f "$0" ;; esac      # bash keeps reading the open file
 echo "== release $SHORT ($REF), deploy script from ${CORNERS_RELEASE_SCRIPT:0:12} (origin/main)"
 

@@ -1,14 +1,47 @@
-# Runbook v0.5.5
+# Runbook v0.5.6
 
-**Part X** upgrades v0.5.4 to v0.5.5 and refreshes the server clone once, so `release.sh` stops running a stale copy of itself. Do it next, then A11.
-**Done:** Part W (v0.5.4, 30 Oct; W6 is due after 00:00 UTC 1 Nov), Part V, Part U, Part A-H, and Part A up to A10.
+**Part Y** upgrades v0.5.5 to v0.5.6 (team-map proposals for UEFA, placeholder exclusion, a confirmation step for root-run deploy changes). Do it next, then A11 from step 1 with the new proposals.
+**Done:** Part X (v0.5.5, 30 Oct), Part W (W6 is due after 00:00 UTC 1 Nov), Part V, Part U, Part A-H, and Part A up to A10.
 **Part B** is a fresh install, for reference.
 
 Run all commands on the VM unless a step says otherwise. Replace `OWNER` with your GitHub user or organisation.
 
 ---
 
-## Part X — Upgrade to v0.5.5 (do this next)
+## Part Y — Upgrade to v0.5.6 (do this next)
+
+**What it changes:**
+- **`map-propose`** gains opponent propagation (DESIGN §5). At a simultaneous kickoff, a participant whose opponent is already approved is pinned to the one fixture with that team on the same side. Only approved pairs propagate, so the UEFA clubs map in rounds: load the domestic map, then propose again.
+- **Placeholders** ("Winner Match 2" and the like) are never proposed, and the loader refuses them.
+- **A `decision` column** replaces hand-clearing `conflicts`. Rows are pre-marked `accept` when the support dominates any conflict (5 times or more); otherwise they read `REVIEW: <why>`. The loader takes only `accept` rows. Reloading an already-loaded identical row is skipped; changing an approved pair is refused.
+- **`release.sh` asks before running changed root-run files.** If `deploy/` differs from the last tree you approved, it prints the diff and waits for you to type `yes`. This takes effect from the release **after** this one: this release itself is started by the v0.5.5 script, which doesn't ask.
+
+No schema change, no timer change.
+
+### Y1. Merge the commit into your clone and push (as `azureuser`)
+
+```bash
+scp corner-fresh-v056.bundle azureuser@<vm>:~/          # from your PC
+cd ~/corner-fresh
+git fetch ~/corner-fresh-v056.bundle main
+git merge --no-edit FETCH_HEAD          # expect "Merge made by the 'ort' strategy"
+git push
+```
+
+### Y2. Deploy
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh main
+sudo git -C /opt/corners/repo log -1 --oneline        # now your Y1 merge commit: the approved deploy/ tree
+```
+
+**Expected:** the same shape as X3 (deploy-script line, six `job:` lines, timer table, `plan`, watchdog `ok`).
+
+From the next release on, any change under `deploy/` shows its diff and a `Type yes to run this as root:` prompt. Read the diff, then answer.
+
+---
+
+## Part X — Upgrade to v0.5.5 (done 30 Oct)
 
 **Why the timer table never printed.** `release.sh` runs from the server clone's working tree, `/opt/corners/repo/deploy/release.sh`. Its `git fetch` updates the clone's objects but never that file. So every deploy since b9c09f6 (v0.5.2, v0.5.3 and v0.5.4) ran the b9c09f6 script. That script has no job list, no timer step, no `plan` post-check and no `sync-timers.sh` call (DESIGN §0.7, corrected). From v0.5.5, `release.sh` re-executes itself from `origin/main` and prints which script it is running. The stale copy doesn't have that logic yet, so X2 refreshes the working tree **once**.
 
@@ -835,24 +868,47 @@ Every command here is a by-hand run (v0.5.3): each gets its own `by hand` slot a
 
 ### A11. Team map, from review to load
 
-1. Propose the mappings:
+Run on v0.5.6 or later. The map is built in rounds:
+- round 1 maps every team that has a fixture with a unique kickoff (all domestic teams, many qualifier clubs);
+- round 2 maps UEFA league-stage clubs through an opponent approved in round 1;
+- round 3 repeats if round 2 left clubs whose only opponents were themselves new in round 2.
+
+Each round is reviewed and committed on its own.
+
+1. **Propose round 1:**
    ```bash
    sudo /opt/corners/app/deploy/run.sh map-propose
    sudo cat /opt/corners/data/review/team_map_proposals.csv > ~/corner-fresh/review/team_map_v1.csv
    ```
-2. Review `review/team_map_v1.csv`. Delete any wrong rows and resolve any `conflicts`.
-3. Commit, push, and fetch the commit into the server clone:
+   **Expected:** about 186 rows (your 188 minus the two placeholders), `placeholders_excluded` listing `Winner Match 2` and `Winner Match 3`, most rows `accept`, and a few `REVIEW: conflicts not dominated`. Frosinone, at 4 against 1, is one.
+2. **Review.**
+   - Your earlier review still applies; the pairs are the same.
+   - Change each `REVIEW: …` you accept to exactly `accept`, and delete any row you reject. Leave `conflicts` as it is: it is evidence.
+   - Check that nothing else is marked REVIEW:
+     ```bash
+     grep -c ',accept$' ~/corner-fresh/review/team_map_v1.csv; grep REVIEW ~/corner-fresh/review/team_map_v1.csv
+     ```
+3. **Commit, push, and fetch the commit into the server clone:**
    ```bash
    cd ~/corner-fresh && git add review/team_map_v1.csv && git commit -m "team map v1 (reviewed)" && git push
    SHA=$(git rev-parse HEAD)
    sudo git -C /opt/corners/repo fetch --quiet origin
    ```
-4. Load and apply. The loader reads the CSV from git at that commit, not from disk:
+4. **Load and apply.** The loader reads the CSV from git at that commit, not from disk:
    ```bash
-   sudo /opt/corners/app/deploy/run.sh map-load-teams $SHA review/team_map_v1.csv
+   sudo /opt/corners/app/deploy/run.sh map-load-teams $SHA review/team_map_v1.csv     # "loaded": N, "already_loaded": 0
    sudo /opt/corners/app/deploy/run.sh map-apply
    ```
-5. **Backfill** history (free) and exploration-season outcomes. The history backfill takes about an hour per 600 fixtures, at 6 s each. Run it inside `tmux`, so a dropped SSH session doesn't kill it halfway (that would leave a by-hand slot stuck as `running`):
+5. **Round 2 (UEFA), the same steps with `v2`:**
+   ```bash
+   sudo /opt/corners/app/deploy/run.sh map-propose          # expect via_opponent_rows close to 20
+   sudo cat /opt/corners/data/review/team_map_proposals.csv > ~/corner-fresh/review/team_map_v2.csv
+   ```
+   - Review: these rows show `via_opponent` support; with 8 league-stage games each, expect support of 3 or more.
+   - Commit, fetch and load as in steps 3–4 with `team_map_v2.csv`, then `map-apply`.
+   - Re-run your coverage check. If any UEFA club is still missing, do a round 3. If `map-propose` returns `proposed_rows: 0` while clubs are still missing, stop and send me the list.
+
+6. **Backfill** history (free) and exploration-season outcomes. The history backfill takes about an hour per 600 fixtures, at 6 s each. Run it inside `tmux`, so a dropped SSH session doesn't kill it halfway (that would leave a by-hand slot stuck as `running`):
    ```bash
    tmux new -s backfill
    sudo /opt/corners/app/deploy/run.sh op-backfill --max 600     # repeat until "requested": 0
@@ -861,7 +917,7 @@ Every command here is a by-hand run (v0.5.3): each gets its own `by hand` slot a
    Detach with `Ctrl-b d` and reattach later with `tmux attach -t backfill`.
    - `op-backfill` (v0.5.4 and later) asks only for mapped fixtures, settles each 404 as `no_history`, and prints `usable`, `no_history`, `rate_limited` and `failed`. Expect `no_history` for the fixtures of 1–4 January (about 60) and `usable` from mid-January.
    - If `rate_limited` or `failed` keeps appearing, stop and send me the output.
-6. **Activate the OddsPapi jobs** (the W4 probe is answered: DESIGN §6.1). In your clone, edit `config/production.toml`:
+7. **Activate the OddsPapi jobs**, once your coverage check shows 0 missing in every tournament (the W4 probe is answered: DESIGN §6.1). In your clone, edit `config/production.toml`:
    - set `active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]`;
    - replace the comment above it that says op_history "does nothing until mappings exist" with `# op_history fetches mapped fixtures only (v0.5.4).`
 
