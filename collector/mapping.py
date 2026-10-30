@@ -209,10 +209,56 @@ def _load_rows(con: sqlite3.Connection, lines: list[str], commit: str) -> dict:
     return {"loaded": n, "already_loaded": skipped}
 
 
+STRUCT_WINDOW_MS = 4 * 86_400_000   # structure basis: listed start within 4 days of the kickoff (pins the season)
+
+
+def _pair_fixtures(con, leagues, home_id, away_id):
+    """api-football fixtures with exactly this ordered pair, in the given league-seasons:
+    (fixture_id, kickoff_ms, league_id, season, occurrences of the pair in that league-season)."""
+    rows = []
+    for league_id, season in leagues:
+        found = con.execute(
+            "SELECT f.fixture_id, l.kickoff_ms FROM fixture f JOIN v_fixture_latest l USING (fixture_id)"
+            " WHERE f.league_id=? AND f.season=? AND f.home_team_id=? AND f.away_team_id=?",
+            (league_id, season, home_id, away_id)).fetchall()
+        rows += [(fid, ko, league_id, season, len(found)) for fid, ko in found]
+    return rows
+
+
+def classify(con, leagues, team: dict, hk: str, ak: str, start: int):
+    """('kickoff', match) | ('structure', match) | (reason, None) for one candidate.
+
+    kickoff:   exactly one api-football fixture within 15 minutes with these teams and sides;
+    structure: no kickoff match, but exactly one fixture with this ORDERED pair within 4
+               days of the listed start, and the pair occurs once in its league-season
+               (double round robin, UEFA league stage). Cup legs and play-offs repeat a
+               pair, so they keep the kickoff rule.
+    Reasons (never mapped): team_not_allowlisted, orientation_swapped (only the reversed
+    pair exists near this date: refused, never mapped reversed), pair_not_unique_in_season,
+    kickoff_gap_over_4_days, no_af_fixture, ambiguous."""
+    if hk not in team or ak not in team:
+        return "team_not_allowlisted", None
+    near = [m for m in _af_matches(con, leagues, start) if m[1] == team[hk] and m[2] == team[ak]]
+    if len(near) == 1:
+        return "kickoff", near[0]
+    if len(near) > 1:
+        return "ambiguous", None
+    pair = _pair_fixtures(con, leagues, team[hk], team[ak])
+    window = [r for r in pair if abs(r[1] - start) <= STRUCT_WINDOW_MS]
+    if len(window) == 1 and window[0][4] == 1:
+        return "structure", window[0]
+    if window:
+        return "pair_not_unique_in_season", None
+    if any(abs(r[1] - start) <= STRUCT_WINDOW_MS for r in _pair_fixtures(con, leagues, team[ak], team[hk])):
+        return "orientation_swapped", None
+    return ("kickoff_gap_over_4_days" if pair else "no_af_fixture"), None
+
+
 def apply(cfg: Config, con: sqlite3.Connection, provider: str = "oddspapi") -> dict:
     t2l = _tournament_league(cfg)
     team = dict(con.execute("SELECT provider_team_key, team_id FROM provider_team_map WHERE provider=?", (provider,)))
     live = {r[0] for r in con.execute("SELECT provider_fixture_id FROM provider_fixture_map WHERE provider=?", (provider,))}
+    names = dict(con.execute("SELECT team_id, name FROM team").fetchall())
     stats = defaultdict(int)
     for pid, tkey, hk, ak, hn, an, start in _latest_candidates(con, provider):
         if pid in live:
@@ -222,24 +268,59 @@ def apply(cfg: Config, con: sqlite3.Connection, provider: str = "oddspapi") -> d
         if league is None:
             stats["untracked_tournament"] += 1
             continue
-        if hk not in team or ak not in team:
-            stats["team_not_allowlisted"] += 1
+        basis, m = classify(con, league, team, hk, ak, start)
+        if m is None:
+            stats[basis] += 1
             continue
-        matches = [m for m in _af_matches(con, league, start) if m[1] == team[hk] and m[2] == team[ak]]
-        if len(matches) != 1:
-            stats["no_unique_af_fixture" if not matches else "ambiguous"] += 1
-            continue
-        fid, _, _, hname, aname, ko = matches[0]
-        evidence = (f"participants {hk}={hn!r}->{team[hk]} {hname!r}, {ak}={an!r}->{team[ak]} {aname!r};"
-                    f" start {start} vs kickoff {ko} (diff {abs(start - ko) // 1000}s)")
+        fid, ko = (m[0], m[5]) if basis == "kickoff" else (m[0], m[1])
+        evidence = (f"{basis}: participants {hk}={hn!r}->{team[hk]} {names.get(team[hk])!r}, "
+                    f"{ak}={an!r}->{team[ak]} {names.get(team[ak])!r}; start {start} vs kickoff {ko} "
+                    f"(diff {abs(start - ko) // 1000}s)" + ("; ordered pair unique in its league-season"
+                                                             if basis == "structure" else ""))
         try:
             con.execute("INSERT INTO provider_fixture_map (provider, provider_fixture_id, fixture_id, home_team_key,"
-                        " away_team_key, provider_start_ms, kickoff_at_map_ms, evidence, mapped_at_ms)"
-                        " VALUES (?,?,?,?,?,?,?,?,?)", (provider, pid, fid, hk, ak, start, ko, evidence, now_ms()))
-            stats["mapped"] += 1
+                        " away_team_key, provider_start_ms, kickoff_at_map_ms, evidence, mapped_at_ms, map_basis)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?)", (provider, pid, fid, hk, ak, start, ko, evidence, now_ms(), basis))
+            stats["mapped" if basis == "kickoff" else "mapped_by_structure"] += 1
         except sqlite3.IntegrityError as e:
             stats[f"refused: {str(e)[:80]}"] += 1
     return dict(stats)
+
+
+def unmapped_candidates(cfg: Config, con: sqlite3.Connection, t: int | None = None, provider: str = "oddspapi",
+                        list_played: bool = True) -> dict:
+    """Every listed candidate in a tracked tournament that has no live mapping, by reason,
+    split played (start in the past) and future, per tournament; plus the played ones
+    listed, so a hole in the sample can't hide."""
+    t = now_ms() if t is None else t
+    t2l = _tournament_league(cfg)
+    team = dict(con.execute("SELECT provider_team_key, team_id FROM provider_team_map WHERE provider=?", (provider,)))
+    live = {r[0] for r in con.execute("SELECT provider_fixture_id FROM provider_fixture_map WHERE provider=?"
+                                      " AND revoked=0", (provider,))}
+    by_reason: dict[str, dict] = defaultdict(lambda: {"played": 0, "future": 0})
+    by_tournament: dict[str, dict] = defaultdict(lambda: defaultdict(int))
+    played = []
+    for pid, tkey, hk, ak, hn, an, start in _latest_candidates(con, provider):
+        if pid in live or tkey not in t2l:
+            continue
+        reason, m = classify(con, t2l[tkey], team, hk, ak, start)
+        if m is not None:
+            reason = "mappable_now (run map-apply)"
+        when = "played" if start < t else "future"
+        by_reason[reason][when] += 1
+        by_tournament[tkey][f"{reason}:{when}"] += 1
+        if when == "played" and list_played:
+            played.append({"tournament": tkey, "fixture": pid, "match": f"{hn} v {an}",
+                           "start_utc": _utc(start), "reason": reason})
+    out = {"by_reason": dict(by_reason), "by_tournament": {k: dict(v) for k, v in sorted(by_tournament.items())}}
+    if list_played:
+        out["played"] = sorted(played, key=lambda r: (r["tournament"], r["start_utc"]))
+    return out
+
+
+def _utc(ms: int) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
 def audit_kickoffs(con: sqlite3.Connection, provider: str = "oddspapi") -> dict:
@@ -252,7 +333,12 @@ def audit_kickoffs(con: sqlite3.Connection, provider: str = "oddspapi") -> dict:
         " FROM provider_fixture_map m JOIN v_fixture_latest l ON l.fixture_id = m.fixture_id"
         " WHERE m.provider=? AND m.revoked=0 AND l.status_short IN ('FT','AET','PEN')"
         " AND NOT EXISTS (SELECT 1 FROM mapping_audit a WHERE a.provider=m.provider"
-        "   AND a.provider_fixture_id=m.provider_fixture_id AND a.method='kickoff_recheck')", (provider,)).fetchall()
+        "   AND a.provider_fixture_id=m.provider_fixture_id AND a.method='kickoff_recheck')"
+        # A structure mapping is rechecked only against a listing made AFTER the kickoff:
+        # before that, the listed start is the provisional one the mapping was made despite.
+        " AND (m.map_basis = 'kickoff' OR EXISTS (SELECT 1 FROM provider_fixture_candidate c"
+        "   JOIN raw_response r ON r.raw_id = c.raw_id WHERE c.provider=m.provider"
+        "   AND c.provider_fixture_id=m.provider_fixture_id AND r.received_at_ms > l.kickoff_ms))", (provider,)).fetchall()
     out = defaultdict(int)
     for pid, fid, ko, start, raw_id in rows:
         agrees = int(abs(start - ko) <= TOL_MS)
@@ -288,6 +374,17 @@ ALERT_MIN_FIXTURES = 5      # ... for a tournament with at least 5 upcoming fixt
 RELIST_SHARE = 0.10         # relist when >10% of upcoming fixtures have NO OddsPapi candidate at all
 
 
+def _listed_by_pair(con, provider: str, tkey: str, fixture_id: int, ko: int) -> bool:
+    """OddsPapi lists this fixture's ordered pair within 4 days, even if its listed start is
+    stale: then it is 'candidate_unmapped' (relisting wouldn't help), not 'no_candidate'."""
+    return con.execute(
+        "SELECT 1 FROM provider_fixture_candidate c JOIN fixture f ON f.fixture_id = ?"
+        " JOIN provider_team_map h ON h.provider = c.provider AND h.provider_team_key = c.home_team_key"
+        " JOIN provider_team_map a ON a.provider = c.provider AND a.provider_team_key = c.away_team_key"
+        " WHERE c.provider = ? AND c.tournament_key = ? AND h.team_id = f.home_team_id AND a.team_id = f.away_team_id"
+        " AND abs(c.start_ms - ?) <= ?", (fixture_id, provider, tkey, ko, STRUCT_WINDOW_MS)).fetchone() is not None
+
+
 def unmapped_upcoming(cfg: Config, con: sqlite3.Connection, horizon_h: int = 72,
                       provider: str = "oddspapi", t: int | None = None) -> dict[str, dict]:
     """Per OddsPapi tournament: api-football fixtures kicking off within horizon_h, and
@@ -309,7 +406,8 @@ def unmapped_upcoming(cfg: Config, con: sqlite3.Connection, horizon_h: int = 72,
                                (provider, fid)).fetchone():
                     mapped += 1
                 elif con.execute("SELECT 1 FROM provider_fixture_candidate WHERE provider=? AND tournament_key=?"
-                                 " AND abs(start_ms - ?) <= ?", (provider, tkey, ko, TOL_MS)).fetchone():
+                                 " AND abs(start_ms - ?) <= ?", (provider, tkey, ko, TOL_MS)).fetchone() \
+                        or _listed_by_pair(con, provider, tkey, fid, ko):
                     cand_unmapped += 1
                 else:
                     no_cand += 1

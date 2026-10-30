@@ -125,7 +125,7 @@ def main(argv=None) -> int:
     p.add_argument("--af-first-half-start")
     p.add_argument("--markets-raw-id", type=int, help="raw id of the archived /v4/markets catalog, for market families")
     for c in ("init", "migrate", "check-config", "scheduled-jobs", "plan", "watchdog", "af-fixtures", "af-odds", "af-results", "af-bootstrap", "op-account",
-              "op-history", "report", "map-propose", "map-apply", "map-audit", "map-sample"):
+              "op-history", "report", "map-propose", "map-apply", "map-audit", "map-sample", "map-unmapped"):
         sub.add_parser(c)
     p = sub.add_parser("op-fixtures")
     p.add_argument("--force", action="store_true", help="list every configured tournament now (billable)")
@@ -458,6 +458,8 @@ def mapping_cmd(cfg, con, a) -> int:
              "from": f"{a.commit}:{a.path_in_repo}"})
     elif a.cmd == "map-apply":
         out(mapping.apply(cfg, con))
+    elif a.cmd == "map-unmapped":
+        out(mapping.unmapped_candidates(cfg, con))
     elif a.cmd == "map-audit":
         out({"kickoff_recheck": mapping.audit_kickoffs(con),
              "misjoin_rate": con.execute("SELECT * FROM v_misjoin_rate").fetchall()})
@@ -559,6 +561,8 @@ def report(con, cfg=None) -> dict:
                                    " AND note IS ? GROUP BY job, status ORDER BY job, status", day, ledger.BY_HAND_NOTE),
         "raw_vs_requests": raw_vs_requests(con),
         "op_history": history_health(con, t),
+        "unmapped_candidates_by_reason": mapping.unmapped_candidates(cfg, con, t, list_played=False)["by_reason"]
+        if cfg else None,
         "raw_last_24h": q("SELECT a.provider, a.endpoint, sum(r.usable), count(*) FROM raw_response r"
                           " JOIN api_request a ON a.request_id=r.request_id WHERE r.received_at_ms > ?"
                           " GROUP BY a.provider, a.endpoint", day),

@@ -38,6 +38,7 @@ class Config:
     op_quota_reserve: int = 50                # never let the provider count come within this of the limit
     op_fixtures_refresh_days: int = 28
     op_fixtures_from: str | None = None       # e.g. "2026-01-01T00:00:00Z" for the one-off backfill listing
+    op_fixtures_lookback_days: int = 35       # every other listing also covers the last 35 days (refresh 28 + 7)
     op_history_delay_h: float = 3.0           # pull history this long after scheduled kickoff
     op_history_max_per_run: int = 60          # ~6 minutes at the 6 s pacing
     op_history_404_recheck_h: float = 24.0    # a fixture that returned 404 is asked once more after this long
@@ -86,6 +87,7 @@ def load(path: str | Path) -> Config:
         op_quota_reserve=int(op.get("quota_reserve", 50)),
         op_fixtures_refresh_days=int(op.get("fixtures_refresh_days", 28)),
         op_fixtures_from=op.get("fixtures_from"),
+        op_fixtures_lookback_days=int(op.get("fixtures_lookback_days", 35)),
         op_history_delay_h=float(op.get("history_delay_h", 3.0)),
         op_history_max_per_run=int(op.get("history_max_per_run", 60)),
         op_history_404_recheck_h=float(op.get("history_404_recheck_h", 24.0)),
