@@ -1,0 +1,47 @@
+provider,provider_team_key,provider_team_name,team_id,af_team_name,supporting_fixtures,via_kickoff,via_opponent,conflicts,decision
+oddspapi,3250,AEK Athens,575,AEK Athens FC,8,0,8,,accept
+oddspapi,2950,AZ Alkmaar,201,AZ Alkmaar,7,0,7,,accept
+oddspapi,2953,Ajax Amsterdam,194,Ajax,2,0,2,,accept
+oddspapi,2424,Aluminij Kidricevo,4358,Aluminij,2,0,2,,accept
+oddspapi,3050,Besiktas Istanbul,549,Beşiktaş,8,0,8,,accept
+oddspapi,2352,Celtic Glasgow,247,Celtic,8,0,8,,accept
+oddspapi,3170,Derry City FC,670,Derry City,2,0,2,,accept
+oddspapi,364472,FC Ararat-Armenia,3683,Ararat-Armenia,10,0,10,,accept
+oddspapi,1284,FC Copenhagen,400,FC Copenhagen,2,0,2,,accept
+oddspapi,1289,FC Midtjylland,397,FC Midtjylland,3,0,3,,accept
+oddspapi,3002,FC Porto,212,FC Porto,8,0,8,,accept
+oddspapi,2046,FC Salzburg,571,Red Bull Salzburg,12,0,12,,accept
+oddspapi,3313,FC Shakhtar Donetsk,550,Shakhtar Donetsk,5,0,5,,accept
+oddspapi,2955,FC Twente Enschede,415,Twente,2,0,2,,accept
+oddspapi,4502,FC Viktoria Plzen,567,Plzen,5,0,5,,accept
+oddspapi,5235,FK Borac Banja Luka,3364,Borac Banja Luka,2,0,2,,accept
+oddspapi,5149,FK Crvena Zvezda Belgrade,598,FK Crvena Zvezda,7,0,7,,accept
+oddspapi,5150,FK Vojvodina Novi Sad,702,Vojvodina,2,0,2,,accept
+oddspapi,2959,Feyenoord Rotterdam,209,Feyenoord,8,0,8,,accept
+oddspapi,3301,Fotbal Club FCSB,559,FCSB,2,0,2,,accept
+oddspapi,2979,Go Ahead Eagles,410,GO Ahead Eagles,2,0,2,,accept
+oddspapi,1758,Hammarby IF,363,Hammarby FF,2,0,2,,accept
+oddspapi,37946,Inter Club de Escaldes,3342,Inter Club d'Escaldes,2,0,2,,accept
+oddspapi,7691,Jagiellonia Bialystok,336,Jagiellonia,8,0,8,,accept
+oddspapi,2890,KRC Genk,742,Genk,4,0,4,,accept
+oddspapi,2058,LASK Linz,1026,Lask Linz,5,0,5,,accept
+oddspapi,664,Lillestroem SK,321,Lillestrom,8,0,8,,accept
+oddspapi,2402,MSK Zilina,3554,Žilina,2,0,2,,accept
+oddspapi,3241,OFI Crete,1124,OFI,10,0,10,,accept
+oddspapi,3251,PAOK Thessaloniki,619,PAOK,6,0,6,,accept
+oddspapi,43840,PFC Ludogorets 1945 Razgrad,566,Ludogorets,3,0,3,,accept
+oddspapi,2952,PSV Eindhoven,197,PSV Eindhoven,7,0,7,,accept
+oddspapi,3248,Panathinaikos Athens,617,Panathinaikos,4,0,4,,accept
+oddspapi,167232,Petrocub Hincesti,2271,Petrocub,2,0,2,,accept
+oddspapi,25787,SCU Torreense,4799,Torreense,5,0,5,,accept
+oddspapi,1159,SK Brann,319,Brann,3,0,3,,accept
+oddspapi,2404,SK Slovan Bratislava,656,Slovan Bratislava,12,0,12,,accept
+oddspapi,36195,SP Tre Fiori,2260,Tre Fiori,2,0,2,,accept
+oddspapi,2216,Slavia Prague,560,Slavia Praha,9,0,9,,accept
+oddspapi,2895,St. Truidense VV,735,St. Truiden,2,0,2,,accept
+oddspapi,4921,The New Saints FC,354,The New Saints,2,0,2,,accept
+oddspapi,3051,Trabzonspor,998,Trabzonspor,2,0,2,,accept
+oddspapi,4860,Union Saint-Gilloise,1393,Union St. Gilloise,9,0,9,,accept
+oddspapi,1164,Viking FK,759,Viking,8,0,8,,accept
+oddspapi,1923,WKW ETO FC Gyor,2402,Gyori ETO FC,2,0,2,,accept
+oddspapi,2445,Young Boys Bern,565,BSC Young Boys,2,0,2,,accept
