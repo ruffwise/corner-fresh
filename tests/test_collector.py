@@ -78,7 +78,7 @@ def env(tmp_path, monkeypatch):
         'db_path = "data/c.db"\narchive_dir = "data/archive"\nreview_dir = "data/review"\n'
         'active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]\n'
         '[[leagues]]\nleague_id = 39\nseason = 2026\noddspapi_tournament_id = 17\n'
-        '[oddspapi]\nmonthly_billable_budget = 5\nquota_reserve = 50\n')
+        '[oddspapi]\nmonthly_billable_budget = 5\nquota_reserve = 50\nfixtures_lookback_days = 0\n')
     cfg = load(tmp_path / "config.toml")
     con = init_db(cfg.db_path)
     fake = Fake()
@@ -458,7 +458,7 @@ def test_mapping_refuses_swapped_orientation(env, tmp_path):
     fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
     fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=swapped)))
     run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s))
-    assert mapping.apply(cfg, con) == {"no_unique_af_fixture": 1}
+    assert mapping.apply(cfg, con) == {"orientation_swapped": 1}           # refused, reported, never reversed
 
 
 def test_load_teams_refuses_conflicts(env, tmp_path):
@@ -549,7 +549,7 @@ def test_restore_test_detects_short_copy(env, tmp_path):   # ABSENT rows in the 
     cfg, con, fake, f = env
     r = backup(cfg.db_path, cfg.db_path.parent / "backups")
     with pytest.raises(RuntimeError, match="fewer rows"):
-        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5}, 7)
+        restore_test(Path(r["backup"]), {**r["rows"], "fixture": 5}, 8)
 
 
 def test_cli_offline_commands(env, capsys):
@@ -1214,3 +1214,107 @@ def test_one_team_for_two_keys_is_review(env, tmp_path):
     rows = read_rows(out)
     assert rows["17"]["decision"].startswith("REVIEW: team also proposed for key 99")
     assert rows["99"]["decision"].startswith("REVIEW: team also proposed for key 17")
+
+
+# --- v0.5.7: structure basis for provisional kickoffs --------------------------------------------
+
+def league_world(env, fixtures, cands, tmp_path):
+    """Approved teams 1 (key 17) and 2 (key 44), plus 3 (key 55); given af fixtures and OddsPapi candidates."""
+    cfg, con, fake, f = env
+    fake.add("/fixtures", {"league": 39, "season": 2026}, (200, af_page(fixtures)))
+    run(con, "af_fixtures", lambda s: AF(cfg, con, f).fixtures(s))
+    for key, tid, nm in (("17", 1, "Home FC"), ("44", 2, "Away FC"), ("55", 3, "Third FC")):
+        if con.execute("SELECT 1 FROM team WHERE team_id=?", (tid,)).fetchone():
+            con.execute("INSERT INTO provider_team_map VALUES ('oddspapi',?,?,?,?)", (key, nm, tid, "c" * 40))
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    fake.add("/v4/fixtures", {"tournamentId": 17}, (200, listing(items=cands)))
+    run(con, "op_fixtures", lambda s: OP(cfg, con, f).fixtures(s, force=[17]))
+    return cfg, con
+
+
+def test_retimed_league_fixture_maps_by_structure(env, tmp_path):        # the 31 Oct Ligue 1 case
+    ko = close.iso_ms("2026-10-31T20:00:00Z")                              # api-football: final time
+    cfg, con = league_world(env, [af_fixture(700, ko)], [dict(listing()[0], fixtureId="L1",
+                                                              startTime="2026-10-31T16:15:00Z")], tmp_path)
+    assert mapping.apply(cfg, con) == {"mapped_by_structure": 1}
+    row = con.execute("SELECT fixture_id, map_basis, evidence FROM provider_fixture_map").fetchone()
+    assert row[:2] == (700, "structure") and "ordered pair unique" in row[2]
+
+
+def test_structure_refuses_a_pair_that_repeats_in_the_season(env, tmp_path):   # cup legs, play-offs
+    ko1, ko2 = close.iso_ms("2026-10-31T20:00:00Z"), close.iso_ms("2026-11-02T20:00:00Z")
+    cfg, con = league_world(env, [af_fixture(700, ko1), af_fixture(701, ko2)],
+                            [dict(listing()[0], fixtureId="L1", startTime="2026-11-01T12:00:00Z")], tmp_path)
+    assert mapping.apply(cfg, con) == {"pair_not_unique_in_season": 1}
+
+
+def test_structure_needs_the_start_within_4_days(env, tmp_path):
+    ko = close.iso_ms("2026-11-20T20:00:00Z")                              # postponed by weeks
+    cfg, con = league_world(env, [af_fixture(700, ko)], [dict(listing()[0], fixtureId="L1",
+                                                              startTime="2026-10-31T16:15:00Z")], tmp_path)
+    assert mapping.apply(cfg, con) == {"kickoff_gap_over_4_days": 1}
+
+
+def test_schema_refuses_a_structure_mapping_of_a_repeated_pair(env, tmp_path):
+    ko1, ko2 = close.iso_ms("2026-10-31T20:00:00Z"), close.iso_ms("2026-11-30T20:00:00Z")
+    cfg, con = league_world(env, [af_fixture(700, ko1), af_fixture(701, ko2)],
+                            [dict(listing()[0], fixtureId="L1", startTime="2026-10-31T16:15:00Z")], tmp_path)
+    start = close.iso_ms("2026-10-31T16:15:00Z")
+    with pytest.raises(sqlite3.IntegrityError, match="occur once in its league-season"):
+        con.execute("INSERT INTO provider_fixture_map (provider, provider_fixture_id, fixture_id, home_team_key,"
+                    " away_team_key, provider_start_ms, kickoff_at_map_ms, evidence, mapped_at_ms, map_basis)"
+                    " VALUES ('oddspapi','L1',700,'17','44',?,?,'x',1,'structure')", (start, ko1))
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):                 # kickoff basis keeps 15 minutes
+        con.execute("INSERT INTO provider_fixture_map (provider, provider_fixture_id, fixture_id, home_team_key,"
+                    " away_team_key, provider_start_ms, kickoff_at_map_ms, evidence, mapped_at_ms)"
+                    " VALUES ('oddspapi','L1',700,'17','44',?,?,'x',1)", (start, ko1))
+
+
+def test_unmapped_report_lists_reasons_and_played_fixtures(env, tmp_path):
+    ko = close.iso_ms("2026-10-10T16:30:00Z")
+    cfg, con = league_world(env, [af_fixture(700, ko)], [
+        dict(listing()[0], fixtureId="S1", participant1Id=44, participant2Id=17, participant1Name="Away FC",
+             participant2Name="Home FC"),                                            # swapped orientation
+        dict(listing()[0], fixtureId="U1", participant1Id=999, participant1Name="Nobody")], tmp_path)
+    mapping.apply(cfg, con)
+    r = mapping.unmapped_candidates(cfg, con)
+    assert r["by_reason"]["orientation_swapped"] == {"played": 1, "future": 0}
+    assert r["by_reason"]["team_not_allowlisted"]["played"] == 1
+    assert {p["fixture"] for p in r["played"]} == {"S1", "U1"}
+
+
+def test_stale_listing_counts_as_candidate_not_missing(env, tmp_path):
+    """A listed fixture with a stale start must not look 'no_candidate' (that would trigger
+    billable relisting); after structure mapping it is simply mapped."""
+    t = now_ms()
+    ko = (t + 24 * H) // 1000 * 1000
+    stale = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((ko - 4 * H) / 1000))
+    cfg, con = league_world(env, [af_fixture(700, ko)], [dict(listing()[0], fixtureId="L1", startTime=stale,
+                                                              statusId=0)], tmp_path)
+    before = mapping.unmapped_upcoming(cfg, con)["17"]
+    assert before["candidate_unmapped"] == 1 and before["no_candidate"] == 0 and not before["needs_relisting"]
+    mapping.apply(cfg, con)
+    assert mapping.unmapped_upcoming(cfg, con)["17"]["mapped"] == 1
+
+
+@pytest.mark.parametrize("listing_after_kickoff", [True, False])
+def test_structure_mapping_is_rechecked_only_after_a_post_kickoff_listing(env, tmp_path, listing_after_kickoff):
+    # the listing is received 'now'; put the (finished) kickoff before or after that moment
+    ko = (now_ms() + (-48 * H if listing_after_kickoff else 2 * H)) // 1000 * 1000
+    start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((ko - 3 * H) / 1000))      # provisional start
+    cfg, con = league_world(env, [af_fixture(700, ko, status="FT")],
+                            [dict(listing()[0], fixtureId="L1", startTime=start)], tmp_path)
+    assert mapping.apply(cfg, con) == {"mapped_by_structure": 1}
+    assert mapping.audit_kickoffs(con) == ({"disagree": 1} if listing_after_kickoff else {})
+
+
+def test_listing_covers_the_last_35_days_by_default(env, monkeypatch):
+    import dataclasses
+    cfg, con, fake, f = env
+    c35 = dataclasses.replace(cfg, op_fixtures_lookback_days=35)
+    fake.add("/v4/account", {}, (200, {"request_limit": 250, "request_count": 0}))
+    with pytest.raises(ledger.SlotIncomplete):            # no fake route for this query; only the query matters
+        run(con, "op_fixtures", lambda s: OP(c35, con, f).fixtures(s, force=[17]))
+    q = [c[1] for c in fake.calls if c[0] == "/v4/fixtures"][0]
+    want = time.strftime("%Y-%m-%dT00:00:00Z", time.gmtime(time.time() - 35 * 86400))
+    assert q["from"] == want

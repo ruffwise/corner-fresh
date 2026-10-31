@@ -1,4 +1,4 @@
-# Pinnacle-Close Benchmark Study — Design v0.5.6
+# Pinnacle-Close Benchmark Study — Design v0.5.7
 
 **Status.** Draft for review. Supersedes v0.4. When accepted, commit it as part of `prereg-0`, then sign and timestamp it (§13).
 **Date.** 2026-10-30.
@@ -6,10 +6,10 @@
 **Companion files**
 
 - `db/schema.sql` (v4 base), `db/migrations/005_v05.sql` (to v5) and `db/connect.py`
-- `db/migrations/006_v051.sql` (to v6) and `007_v054.sql` (to v7: settled `no_history` outcomes)
+- `db/migrations/006_v051.sql` (to v6), `007_v054.sql` (to v7: settled `no_history` outcomes) and `008_v057.sql` (to v8: mapping by structure)
 - `collector/` and `deploy/`, plus `RUNBOOK.md` (v0.5.4)
 - `analysis/prereg_tests.py`: the two confirmatory tests of §1, for any number of outcomes
-- `tests/`: 287 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
+- `tests/`: 298 pass. One more, `test_every_endpoint_has_a_real_payload`, fails **on purpose** until real payloads are exported (RUNBOOK A12)
 - `analysis/power.py` and its output `analysis/power_output.md`
 
 Every number in this document comes from `analysis/power.py` unless a source is cited.
@@ -19,6 +19,10 @@ Every number in this document comes from `analysis/power.py` unless a source is 
 ---
 
 ## 0. Status, and what changed in v0.5 to v0.5.4
+
+**Status (30 Oct, night).**
+- v0.5.6 deployed (a7f7d4f). Team map rounds 1–3 loaded: 186 + 46 + 7 pairs, all reviewed; 0 participants missing in all 8 tournaments for this season.
+- Mapped 3,248 candidates by kickoff. 920 were left unmapped despite both teams being approved, mostly future Serie A, La Liga, Bundesliga, Ligue 1 and EPL fixtures whose listed start is a provisional time. Of the next 7 days, 3 of 9 Ligue 1 fixtures on 31 Oct. Fixed by mapping by structure (C31).
 
 **Status (30 Oct, evening).**
 - v0.5.5 deployed (5697448): for the first time the release output matched the runbook. It showed the deploy-script line, the six `job:` lines, the timer table and the `plan` output.
@@ -96,6 +100,15 @@ OddsPapi steps (A10–A11) follow the v0.5.3 deploy.
 | C28 | **Placeholder participants** ("Winner Match 2" and the like) are never proposed, and the loader refuses them | Reliance on the reviewer |
 | C29 | **A `decision` column**: `accept`, or `REVIEW: <why>` for undominated conflicts, a team already approved for another key, or one team proposed for two keys. The loader takes only `accept` rows; identical already-loaded rows are skipped, so a cumulative CSV can be reloaded; a changed pair is refused | Loader refusing any non-empty `conflicts` cell |
 | C30 | **Root-run deploy files need your confirmation when they change** (§13): `release.sh` shows the diff of `deploy/` against the last approved tree and asks for `yes` at the terminal | C23's unconditional re-execution |
+
+**v0.5.7 changes** (schema v8):
+
+| # | Change | Supersedes |
+|---|---|---|
+| C31 | **Mapping by structure** (§5). Kickoff agreement stays the first rule. When it fails, a candidate maps if both teams are approved, exactly one api-football fixture has that **ordered** pair within 4 days of the listed start, and the pair occurs **once** in its league-season. The basis is recorded per mapping (`map_basis`), and the schema re-checks uniqueness | The 15-minute rule as the only rule. Listings refresh every 28 days, so a fixture timed or re-timed after a listing couldn't map, and re-timed fixtures are the televised ones: a non-random hole |
+| C32 | **Unmapped candidates by reason** (`map-unmapped`; counts in the daily report): `team_not_allowlisted`, `orientation_swapped`, `pair_not_unique_in_season`, `kickoff_gap_over_4_days`, `no_af_fixture`, `ambiguous`, split played and future, with the played ones listed | `no_unique_af_fixture`, one undifferentiated count |
+| C33 | **The 72-hour check finds a listed fixture by its team pair too.** A stale listed start no longer looks like "not listed", which would have triggered billable relisting every 48 hours | §0.4's kickoff-only candidate lookup |
+| C34 | **Every listing also covers the last 35 days** (`fixtures_lookback_days`), so a post-match listing brings each fixture's final start and `trueStartTime`. That gives close-v1 a second start source and the structure mappings a real kickoff recheck. No extra calls | Listings of upcoming fixtures only |
 
 **v0.5 changes.** Each supersedes the section named.
 
@@ -368,7 +381,12 @@ A test asserts that no `sb_` table exists, and that a bookmaker cannot be given 
    - placeholders are refused;
    - a row identical to an approved pair is skipped, so a cumulative file can be loaded again;
    - a row that would change an approved pair is refused.
-4. `map-apply` maps only fixtures whose two participants are both allowlisted and match exactly one api-football fixture (teams and side, and kickoff within 15 minutes). This is unique even at simultaneous kickoffs.
+4. `map-apply` maps only fixtures whose two participants are both allowlisted, on one of two recorded bases (`map_basis`, v0.5.7):
+   - **kickoff:** exactly one api-football fixture with those teams on the same sides kicks off within 15 minutes. This is unique even at simultaneous kickoffs.
+   - **structure:** no kickoff match, but exactly one api-football fixture with that **ordered** pair lies within 4 days of the listed start, and the pair occurs **once** in its league-season, as in every double round robin and in a UEFA league stage. Cup legs and play-offs repeat a pair, so they keep the kickoff rule. The schema refuses a structure mapping of a repeated pair.
+   - **Why structure is safe:** identity comes from the reviewed team map plus a pair that can occur only once. The 4-day window only pins the season. The listed start isn't used for the close: close-v1 takes its start sources from api-football and from OddsPapi's `trueStartTime`, and every listing now re-covers the last 35 days, so `trueStartTime` arrives after the match.
+   - **Never mapped:** reversed orientation (`orientation_swapped`) is refused and reported. So are repeated pairs, kickoff gaps over 4 days, and missing fixtures (C32).
+   - **Kickoff recheck** (mis-join measurement) runs for a structure mapping only against a listing made after the kickoff. Before that, the listed start is the provisional one the mapping was made despite.
 
 ### Measured mis-join rate (`v_misjoin_rate`)
 
@@ -669,7 +687,8 @@ P0–P12 from v0.2 and v0.3 stand. Those about SportyBet (P1, P7–P12) are void
 | v0.5.3: by-hand runs get their own slots and never ping; `raw_vs_requests` in the report | **Done**; deployed 27 Oct |
 | v0.5.4: mapped-only history, settled 404s, 429 back-off, history health alert, probe, verified timer sync, family eligibility, UEFA stage rule (schema v7) | **Done**; deployed 30 Oct |
 | v0.5.5: `release.sh` runs the latest script; `op-backfill --max`; K-outcome confirmatory tests; G0.5a no_history rule | **Done**; deployed 30 Oct |
-| v0.5.6: opponent propagation, placeholder exclusion, `decision` column and idempotent loader; confirmation of root-run deploy changes | **Done.** Deploy with RUNBOOK Part Y |
+| v0.5.6: opponent propagation, placeholder exclusion, `decision` column and idempotent loader; confirmation of root-run deploy changes | **Done**; deployed 30 Oct |
+| v0.5.7: mapping by structure (schema v8), unmapped reasons, pair-aware 72-hour check, 35-day listing lookback | **Done.** Deploy with RUNBOOK Part Z |
 | Mapping tooling (propose, load from git, apply, kickoff audit, manual sample) | **Done** |
 | M6: parsers into `quote` and `price_history` with allowlists from the day-1 dumps; `price_agreement` audit | Next. Needs the day-1 dumps |
 | M7: G0.5 report, coverage ledger job, de-vig oracle test (R13), training-cutoff guard (R14) | After M6 |

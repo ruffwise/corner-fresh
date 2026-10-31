@@ -13,7 +13,7 @@ MIN_SQLITE = (3, 42, 0)  # STRICT tables; unixepoch('subsec') used by freeze tri
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")          # frozen v4 base
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")       # NNN_name.sql, each ends with PRAGMA user_version = NNN
 BASE_VERSION = 4
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def migrations() -> list[tuple[int, Path]]:
@@ -67,12 +67,27 @@ def apply_migrations(con: sqlite3.Connection) -> list[int]:
     for version, path in migrations():
         if version <= current:
             continue
+        text = path.read_text()
+        # A table rebuild (SQLite's documented 12-step procedure) needs foreign keys OFF,
+        # which only takes effect outside a transaction; such a migration says so on its
+        # first line. Integrity is then checked with foreign_key_check BEFORE commit.
+        fk_off = text.startswith("-- corners-migration: foreign_keys=off")
         try:
-            con.executescript("BEGIN;\n" + path.read_text() + "\nCOMMIT;")
-        except sqlite3.Error:
+            if fk_off:
+                con.execute("PRAGMA foreign_keys = OFF")
+            con.executescript("BEGIN;\n" + text)
+            bad = con.execute("PRAGMA foreign_key_check").fetchall()
+            if bad:
+                raise ConnectionContractError(f"migration {path.name}: foreign_key_check failed: {bad[:5]}")
+            con.execute("COMMIT")
+        except (sqlite3.Error, ConnectionContractError):
             if con.in_transaction:
                 con.execute("ROLLBACK")
             raise
+        finally:
+            if fk_off:
+                con.execute("PRAGMA foreign_keys = ON")
+                _assert(con.execute("PRAGMA foreign_keys").fetchone()[0] == 1, "foreign_keys did not turn back on")
         got = con.execute("PRAGMA user_version").fetchone()[0]
         _assert(got == version, f"migration {path.name} left user_version {got}, expected {version}")
         done.append(version)

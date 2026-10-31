@@ -167,6 +167,12 @@ class OP:
             params = {"tournamentId": tid}
             if self.cfg.op_fixtures_from:
                 params["from"] = self.cfg.op_fixtures_from
+            elif self.cfg.op_fixtures_lookback_days > 0:
+                # Re-list recently played fixtures too: their final start time (and
+                # trueStartTime) replace the provisional one a listing before kickoff held.
+                params["from"] = datetime.fromtimestamp(
+                    (now_ms() - self.cfg.op_fixtures_lookback_days * 86_400_000) / 1000,
+                    tz=timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
             res = self._get(slot, "/v4/fixtures", params, f"fixtures tournament {tid} (billable)")
             if res is not None:
                 listed += self.record_candidates(res, tid)

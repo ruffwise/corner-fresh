@@ -1,14 +1,89 @@
-# Runbook v0.5.6
+# Runbook v0.5.7
 
-**Part Y** upgrades v0.5.5 to v0.5.6 (team-map proposals for UEFA, placeholder exclusion, a confirmation step for root-run deploy changes). Do it next, then A11 from step 1 with the new proposals.
-**Done:** Part X (v0.5.5, 30 Oct), Part W (W6 is due after 00:00 UTC 1 Nov), Part V, Part U, Part A-H, and Part A up to A10.
+**Part Z** upgrades v0.5.6 to v0.5.7: fixtures with provisional kickoffs map by structure (schema v8). Do it next, then A11 steps 6–7.
+**Done:** Part Y (v0.5.6) and A11 steps 1–5 (team map rounds 1–3), 30 Oct; Part X, Part W (W6 is due after 00:00 UTC 1 Nov), Part V, Part U, Part A-H, and Part A up to A10.
 **Part B** is a fresh install, for reference.
 
 Run all commands on the VM unless a step says otherwise. Replace `OWNER` with your GitHub user or organisation.
 
 ---
 
-## Part Y — Upgrade to v0.5.6 (do this next)
+## Part Z — Upgrade to v0.5.7 (do this next)
+
+**What it fixes.** 920 listed fixtures with both teams approved didn't map. Their listed start is a provisional time more than 15 minutes from api-football's kickoff, and listings refresh only every 28 days. v0.5.7 maps them **by structure** (DESIGN §5): the ordered pair occurs once in the league-season, and the listed start is within 4 days. Kickoff agreement stays the first rule. Reversed orientation is refused and reported, never mapped.
+
+**Also:**
+- `map-unmapped` lists every unmapped candidate by reason, and the daily report carries the counts;
+- the 72-hour check now recognises a listed fixture by its team pair, so a stale start can't trigger billable relisting;
+- every listing re-covers the last 35 days.
+
+**Schema v8** rebuilds `provider_fixture_map` to add `map_basis`. The migration backs up and restore-tests first, then runs with foreign keys off, copies, swaps and recreates the triggers. It checks foreign keys before committing and rolls back on any error. This release doesn't change `deploy/`, so `release.sh` won't ask for confirmation.
+
+### Z1. Merge the commit into your clone and push (as `azureuser`)
+
+```bash
+scp corner-fresh-v057.bundle azureuser@<vm>:~/          # from your PC
+cd ~/corner-fresh
+git fetch ~/corner-fresh-v057.bundle main
+git merge --no-edit FETCH_HEAD          # expect "Merge made by the 'ort' strategy"
+git push
+```
+
+### Z2. Deploy
+
+```bash
+sudo bash /opt/corners/repo/deploy/release.sh main
+```
+
+**Expected:**
+- the backup path ends `-pre-migrate-v7.db.gz`, `backup_restore_test` is `ok`, `migrated` is `[8]`;
+- the timer table is all `yes`, and the watchdog is `ok`.
+
+If the migration fails, nothing changes; send me the output.
+
+Check the rebuild kept every mapping:
+
+```bash
+sudo -u corners sqlite3 /opt/corners/data/corners.db \
+  "SELECT map_basis, revoked, count(*) FROM provider_fixture_map GROUP BY 1,2; SELECT count(*) FROM mapping_audit; PRAGMA foreign_key_check;"
+```
+
+**Expected:** `kickoff|0|3248` (your rounds 1–2 total, plus round 3 if you applied it). The `mapping_audit` count should match what you had before. `foreign_key_check` should print nothing.
+
+### Z3. Map by structure
+
+```bash
+sudo /opt/corners/app/deploy/run.sh map-apply
+```
+
+**Expected:** `mapped_by_structure` in the hundreds (most of the 920). The leftover reasons are now named: `orientation_swapped`, `pair_not_unique_in_season`, `kickoff_gap_over_4_days`, `no_af_fixture`, `ambiguous`, `team_not_allowlisted`.
+
+### Z4. What is still unmapped, and why
+
+```bash
+sudo /opt/corners/app/deploy/run.sh map-unmapped > ~/unmapped.json
+python3 -c 'import json; r=json.load(open("/home/azureuser/unmapped.json")); print(json.dumps(r["by_reason"], indent=1)); print(len(r["played"]), "played")'
+```
+
+Send me `by_reason` and the `played` list. I expect, for played fixtures:
+- the UEFA July–August qualifiers (`team_not_allowlisted` for small clubs), which are excluded anyway;
+- 1–4 January;
+- postponed games (`kickoff_gap_over_4_days`);
+- the Frosinone–Udinese swap (`orientation_swapped`).
+
+Future fixtures should be almost all mapped.
+
+### Z5. The 72-hour check before activating
+
+```bash
+sudo /opt/corners/app/deploy/run.sh report | python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r["unmapped_next_72h"], indent=1))'
+```
+
+**Expected:** `"alert": false` in every tournament, including Ligue 1 (34) for 31 Oct. Then continue with A11 step 6 (backfill) and step 7 (activate). If any tournament shows `"alert": true`, send me Z4's output first.
+
+---
+
+## Part Y — Upgrade to v0.5.6 (done 30 Oct)
 
 **What it changes:**
 - **`map-propose`** gains opponent propagation (DESIGN §5). At a simultaneous kickoff, a participant whose opponent is already approved is pinned to the one fixture with that team on the same side. Only approved pairs propagate, so the UEFA clubs map in rounds: load the domestic map, then propose again.
@@ -917,7 +992,7 @@ Each round is reviewed and committed on its own.
    Detach with `Ctrl-b d` and reattach later with `tmux attach -t backfill`.
    - `op-backfill` (v0.5.4 and later) asks only for mapped fixtures, settles each 404 as `no_history`, and prints `usable`, `no_history`, `rate_limited` and `failed`. Expect `no_history` for the fixtures of 1–4 January (about 60) and `usable` from mid-January.
    - If `rate_limited` or `failed` keeps appearing, stop and send me the output.
-7. **Activate the OddsPapi jobs**, once your coverage check shows 0 missing in every tournament (the W4 probe is answered: DESIGN §6.1). In your clone, edit `config/production.toml`:
+7. **Activate the OddsPapi jobs**, once your coverage check shows 0 missing in every tournament and Z5 shows no alert (the W4 probe is answered: DESIGN §6.1). In your clone, edit `config/production.toml`:
    - set `active_jobs = ["af_fixtures", "af_odds", "af_results", "op_account", "op_fixtures", "op_history"]`;
    - replace the comment above it that says op_history "does nothing until mappings exist" with `# op_history fetches mapped fixtures only (v0.5.4).`
 
